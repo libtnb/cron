@@ -33,25 +33,19 @@ func main() {
 		cron.WithLogger(slog.Default()),
 		cron.WithChain(wrap.Recover(), wrap.Timeout(30*time.Second)),
 	)
-
-	if _, err := c.Add("@every 5s", cron.JobFunc(func(ctx context.Context) error {
+	_, _ = c.Add("@every 5s", cron.JobFunc(func(ctx context.Context) error {
 		fmt.Println("tick", time.Now())
 		return nil
-	}), cron.WithName("heartbeat")); err != nil {
-		panic(err)
-	}
+	}), cron.WithName("heartbeat"))
 
 	if err := c.Start(); err != nil {
 		panic(err)
 	}
-
 	<-ctx.Done()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := c.Stop(shutdownCtx); err != nil {
-		panic(err)
-	}
+	_ = c.Stop(shutdownCtx)
 }
 ```
 
@@ -74,6 +68,12 @@ minute hour day-of-month month day-of-week
 
 Descriptors such as `@hourly`, `@daily`, `@every 10s`, `TZ=...`, and
 `CRON_TZ=...` are supported. Use `WithSeconds` for a leading seconds field.
+
+`WithMissedFire` controls behaviour when a firing is later than
+`WithMissedTolerance` (default 1s). `MissedSkip` (the default) drops the
+overdue firing and waits for the next scheduled time. `MissedRunOnce`
+runs the job once for the most recent missed firing, then resumes
+normally — useful for "catch up after restart" semantics.
 
 ```go
 c := cron.New(
@@ -98,29 +98,28 @@ Schedules can also be registered directly:
 id, err := c.AddSchedule(cron.ConstantDelay(time.Hour), job)
 ```
 
-Runtime control is explicit:
+Runtime control is explicit. `Trigger` returns `ErrEntryNotFound`,
+`ErrSchedulerNotRunning`, or `ErrConcurrencyLimit` so the caller can
+distinguish failure modes:
 
 ```go
 if err := c.Start(); err != nil {
-	return err
+	panic(err)
 }
 
 if err := c.Trigger(id); err != nil {
-	return err
+	switch {
+	case errors.Is(err, cron.ErrEntryNotFound):
+	case errors.Is(err, cron.ErrSchedulerNotRunning):
+	case errors.Is(err, cron.ErrConcurrencyLimit):
+	}
 }
 
-count, err := c.TriggerByName("daily-digest")
-if err != nil {
-	return err
-}
-_ = count
+count, err := c.TriggerByName("daily-digest") // err joins per-entry failures
 
-removed := c.Remove(id)
-_ = removed
+c.Remove(id) // returns bool: false if id is unknown
 
-if err := c.Stop(ctx); err != nil {
-	return err
-}
+_ = c.Stop(shutdownCtx)
 ```
 
 `Remove` prevents future automatic fires and future manual triggers for that
@@ -130,9 +129,9 @@ waits for in-flight jobs and hooks until its context is done.
 Read APIs return copied views:
 
 ```go
-entry, ok := c.Entry(id)
-_ = entry
-_ = ok
+if entry, ok := c.Entry(id); ok {
+	fmt.Println(entry.Name, entry.Next)
+}
 
 for e := range c.Entries() {
 	fmt.Println(e.Name, e.Prev, e.Next)
@@ -147,44 +146,40 @@ window := cron.Between(schedule, start, end)
 matched := cron.Matches(schedule, t)
 ```
 
-Hooks and recorders are split into small interfaces, so implementations only
-need the events they use:
+Hooks and recorders are split into small sub-interfaces
+(`ScheduleHook`, `JobStartHook`, `JobCompleteHook`, `MissedHook` for
+hooks; `JobScheduledRecorder`, `JobStartedRecorder`, ...
+for recorders). The dispatcher type-asserts each subscriber and calls
+only the methods it actually implements — no need for empty stubs:
 
 ```go
 type metrics struct{}
 
+// Implements JobCompleteHook only — the other 3 events are skipped.
 func (*metrics) OnJobComplete(e cron.EventJobComplete) {
-	// record duration, error, scheduled time, etc.
+	// record duration, error, etc.
 }
 
-c := cron.New(
-	cron.WithHooks(&metrics{}),
-	cron.WithRecorder(recorder),
-)
+c := cron.New(cron.WithHooks(&metrics{}))
 ```
 
 ## Workflow
 
 `workflow.Workflow` is a `cron.Job`, so a DAG can be scheduled like any other
-job.
+job. Use `New` for config-driven graphs (returns `error` you can inspect with
+`errors.Is` against `ErrDuplicateStep` / `ErrUnknownDep` / `ErrCycle`), or
+`MustNew` for static graphs where a misconfiguration is a programmer error.
 
 ```go
-w, err := workflow.New(
+w := workflow.MustNew(
 	workflow.NewStep("download", downloadJob),
 	workflow.NewStep("transform", transformJob,
 		workflow.After("download", workflow.OnSuccess)),
 	workflow.NewStep("notify_failure", notifyJob,
 		workflow.After("transform", workflow.OnFailure)),
 )
-if err != nil {
-	return err
-}
-
-_, err = c.Add("@hourly", w, cron.WithName("etl"))
+_, _ = c.Add("@hourly", w, cron.WithName("etl"))
 ```
-
-Configuration errors wrap `workflow.ErrDuplicateStep`, `workflow.ErrUnknownDep`,
-or `workflow.ErrCycle`, so callers can use `errors.Is`.
 
 ## Quartz Parser
 
