@@ -45,8 +45,12 @@ func main() {
 		logger.Error("start failed", slog.Any("err", err))
 		os.Exit(1)
 	}
-	defer func() { _ = c.Stop(context.Background()) }()
 
-	ctx, _ := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 	<-ctx.Done()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = c.Stop(shutdownCtx)
 }

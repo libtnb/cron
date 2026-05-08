@@ -86,8 +86,7 @@ func New(opts ...Option) *Cron {
 		cfg.loc = time.Local
 	}
 	if cfg.parser == nil {
-		pOpts := append([]ParserOption{WithDefaultLocation(cfg.loc)}, cfg.parserOpts...)
-		cfg.parser = NewStandardParser(pOpts...)
+		cfg.parser = NewStandardParser(WithDefaultLocation(cfg.loc))
 	}
 	if cfg.missedTolerance <= 0 {
 		cfg.missedTolerance = defaultMissedTolerance
@@ -171,15 +170,6 @@ func (c *Cron) add(spec string, s Schedule, j Job, opts ...EntryOption) (EntryID
 		wrappers = append(wrappers, rp.Wrapper())
 	}
 	wrapped := Chain(wrappers...)(j)
-
-	if c.cfg.maxEntries > 0 {
-		c.mu.Lock()
-		full := len(c.byEntry) >= c.cfg.maxEntries
-		c.mu.Unlock()
-		if full {
-			return 0, ErrCapacityReached
-		}
-	}
 	next := s.Next(time.Now())
 
 	id := EntryID(c.nextID.Add(1))
@@ -290,25 +280,23 @@ func (c *Cron) Entries() iter.Seq[Entry] {
 		for _, cell := range *m {
 			entries = append(entries, *cell.p.Load())
 		}
-		slices.SortFunc(entries, compareEntriesByNext)
+		slices.SortFunc(entries, func(a, b Entry) int {
+			switch {
+			case a.Next.IsZero() && b.Next.IsZero():
+				return 0
+			case a.Next.IsZero():
+				return 1
+			case b.Next.IsZero():
+				return -1
+			default:
+				return a.Next.Compare(b.Next)
+			}
+		})
 		for _, e := range entries {
 			if !yield(e) {
 				return
 			}
 		}
-	}
-}
-
-func compareEntriesByNext(a, b Entry) int {
-	switch {
-	case a.Next.IsZero() && b.Next.IsZero():
-		return 0
-	case a.Next.IsZero():
-		return 1
-	case b.Next.IsZero():
-		return -1
-	default:
-		return a.Next.Compare(b.Next)
 	}
 }
 
@@ -407,10 +395,6 @@ func (c *Cron) peekDelay() time.Duration {
 // fireDue keeps Schedule.Next outside c.mu; user schedules must not block
 // Add/Remove/Trigger.
 func (c *Cron) fireDue(ctx context.Context, now time.Time) {
-	if ctx.Err() != nil {
-		return
-	}
-
 	var due []dueFire
 	nowNano := now.UnixNano()
 
@@ -427,17 +411,8 @@ func (c *Cron) fireDue(ctx context.Context, now time.Time) {
 	}
 	c.mu.Unlock()
 
-	for i, d := range due {
-		if ctx.Err() != nil {
-			c.rePushDue(due[i:])
-			return
-		}
-		p, ok := c.makeFirePlan(ctx, d, now)
-		if !ok {
-			c.rePushDue(due[i:])
-			return
-		}
-		c.commitAndDispatch(ctx, p)
+	for _, d := range due {
+		c.commitAndDispatch(ctx, c.makeFirePlan(d, now))
 	}
 
 	if len(due) > 0 {
@@ -445,7 +420,7 @@ func (c *Cron) fireDue(ctx context.Context, now time.Time) {
 	}
 }
 
-func (c *Cron) makeFirePlan(ctx context.Context, d dueFire, now time.Time) (firePlan, bool) {
+func (c *Cron) makeFirePlan(d dueFire, now time.Time) firePlan {
 	p := firePlan{
 		e:         d.e,
 		scheduled: d.scheduled,
@@ -453,47 +428,20 @@ func (c *Cron) makeFirePlan(ctx context.Context, d dueFire, now time.Time) (fire
 	}
 	if p.lateness > c.cfg.missedTolerance {
 		p.missed = true
-		switch c.cfg.missedPolicy {
-		case MissedSkip:
-		case MissedRunOnce:
-			fireOne, ok := c.findMostRecentMissed(ctx, d.e.schedule, d.scheduled, now)
-			if !ok {
-				return firePlan{}, false
-			}
-			p.fireOne = fireOne
+		if c.cfg.missedPolicy == MissedRunOnce {
+			p.fireOne = c.findMostRecentMissed(d.e.schedule, d.scheduled, now)
 		}
 	} else {
 		p.fireOne = d.scheduled
 	}
-	if ctx.Err() != nil {
-		return firePlan{}, false
-	}
 	p.nextFire = d.e.schedule.Next(now)
-	return p, true
-}
-
-func (c *Cron) rePushDue(due []dueFire) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, d := range due {
-		cur, ok := c.byEntry[d.e.id]
-		if !ok || cur != d.e {
-			continue
-		}
-		if !cur.next.IsZero() && cur.item == nil {
-			cur.item = c.h.Push(cur.next.UnixNano(), cur)
-		}
-	}
+	return p
 }
 
 func (c *Cron) commitAndDispatch(ctx context.Context, p firePlan) {
 	c.mu.Lock()
 	cur, ok := c.byEntry[p.e.id]
 	if !ok || cur != p.e {
-		c.mu.Unlock()
-		return
-	}
-	if ctx.Err() != nil {
 		c.mu.Unlock()
 		return
 	}
@@ -543,24 +491,21 @@ func (c *Cron) commitAndDispatch(ctx context.Context, p firePlan) {
 	}
 }
 
-func (c *Cron) findMostRecentMissed(ctx context.Context, s Schedule, lastFire, now time.Time) (time.Time, bool) {
+func (c *Cron) findMostRecentMissed(s Schedule, lastFire, now time.Time) time.Time {
 	if lastFire.IsZero() || lastFire.After(now) {
-		return time.Time{}, true
+		return time.Time{}
 	}
 	last := lastFire
 	cursor := lastFire
 	for range missedRunOnceCap {
-		if ctx.Err() != nil {
-			return time.Time{}, false
-		}
 		next := s.Next(cursor)
 		if next.IsZero() || next.After(now) {
-			return last, true
+			return last
 		}
 		last = next
 		cursor = next
 	}
-	return last, true
+	return last
 }
 
 func (c *Cron) tryReserveInflight() bool {
@@ -639,17 +584,6 @@ func (c *Cron) heapLen() int {
 	return n
 }
 
-func entryView(e *entry) Entry {
-	return Entry{
-		ID:       e.id,
-		Name:     e.name,
-		Spec:     e.spec,
-		Schedule: e.schedule,
-		Prev:     e.prev,
-		Next:     e.next,
-	}
-}
-
 func (c *Cron) wake() {
 	select {
 	case c.wakeCh <- struct{}{}:
@@ -672,5 +606,16 @@ func (c *Cron) applyJitter(ctx context.Context) bool {
 		return true
 	case <-ctx.Done():
 		return false
+	}
+}
+
+func entryView(e *entry) Entry {
+	return Entry{
+		ID:       e.id,
+		Name:     e.name,
+		Spec:     e.spec,
+		Schedule: e.schedule,
+		Prev:     e.prev,
+		Next:     e.next,
 	}
 }

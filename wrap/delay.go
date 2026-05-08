@@ -19,10 +19,6 @@ func DelayIfRunning() cron.Wrapper {
 			case <-sem:
 			}
 			defer func() { sem <- struct{}{} }()
-
-			if err := ctx.Err(); err != nil {
-				return err
-			}
 			return j.Run(ctx)
 		})
 	}

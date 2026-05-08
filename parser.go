@@ -85,9 +85,6 @@ func (p *StandardParser) Parse(spec string) (Schedule, error) {
 				}
 				loc = l
 				spec = strings.TrimSpace(spec[i+1:])
-				if spec == "" {
-					return nil, &ParseError{Spec: spec, Pos: -1, Reason: "empty spec after timezone"}
-				}
 			}
 		}
 	}
@@ -259,9 +256,6 @@ var (
 )
 
 func getField(spec, name, expr string, b boundary) (uint64, error) {
-	if expr == "" {
-		return 0, &ParseError{Spec: spec, Field: name, Pos: -1, Reason: "empty field"}
-	}
 	var bm uint64
 	for part := range strings.SplitSeq(expr, ",") {
 		v, err := getRange(spec, name, part, b)

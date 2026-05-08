@@ -42,9 +42,6 @@ func (s *SpecSchedule) Next(t time.Time) time.Time {
 			m := nextBitInRange(s.month, uint(t.Month())+1, 12)
 			if m < 0 {
 				m = nextBitInRange(s.month, 1, 12)
-				if m < 0 {
-					return time.Time{}
-				}
 				t = time.Date(t.Year()+1, time.Month(m), 1, 0, 0, 0, 0, loc)
 			} else {
 				t = time.Date(t.Year(), time.Month(m), 1, 0, 0, 0, 0, loc)
@@ -99,7 +96,7 @@ func (s *SpecSchedule) Next(t time.Time) time.Time {
 
 // nextBitInRange returns the lowest set bit in [from, until], or -1.
 func nextBitInRange(bm uint64, from, until uint) int {
-	if from > until || from >= 64 {
+	if from > until {
 		return -1
 	}
 	masked := bm >> from << from

@@ -23,6 +23,29 @@ jobs:
         run: go mod tidy
       - name: Run tests
         run: go test -timeout 1h ./...
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          cache: true
+          go-version: 'stable'
+      - name: Install dependencies
+        run: go mod tidy
+      - name: Run coverage
+        run: |
+          go test -coverprofile=cov.out -covermode=atomic ./...
+          grep -v "/examples/" cov.out > cov.lib.out
+          total=$(go tool cover -func=cov.lib.out | tail -1 | awk '{print $NF}')
+          echo "coverage=$total"
+          if [ "$total" != "100.0%" ]; then
+            echo "::error::library coverage dropped below 100% ($total)"
+            go tool cover -func=cov.lib.out | awk '$NF != "100.0%" && $NF != "(statements)"'
+            exit 1
+          fi
   fuzz:
     strategy:
       matrix:

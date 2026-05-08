@@ -124,6 +124,16 @@ func TestSpecSchedule_DST_FallBack_BothFiringsObservedAtScheduleLayer(t *testing
 	}
 }
 
+func TestSpecSchedule_NextWraps_FromMonthBeyondLastFiringMonth(t *testing.T) {
+	// "0 0 1 1 *" only fires Jan 1; from December must roll into next year,
+	// exercising nextBitInRange(month, 13, 12) where from > until.
+	s := mustParseSpec(t, "0 0 1 1 *")
+	got := s.Next(t0(2026, 12, 15, 12, 0, 0))
+	if want := t0(2027, 1, 1, 0, 0, 0); !got.Equal(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
 func TestSpecSchedule_LogValue(t *testing.T) {
 	s := mustParseSpec(t, "@hourly")
 	_ = s.LogValue()

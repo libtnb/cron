@@ -53,16 +53,6 @@ func TestRecorder_NoopByDefault(t *testing.T) {
 	_, _ = c.Add("@every 1s", cron.JobFunc(func(ctx context.Context) error { return nil }))
 }
 
-func TestNoopRecorder_AllMethods(t *testing.T) {
-	r := cron.NoopRecorder{}
-	r.JobScheduled("x")
-	r.JobStarted("x")
-	r.JobCompleted("x", time.Second, nil)
-	r.JobMissed("x", time.Second)
-	r.QueueDepth(0)
-	r.HookDropped()
-}
-
 type completedOnlyRecorder struct{ n atomic.Int64 }
 
 func (r *completedOnlyRecorder) JobCompleted(string, time.Duration, error) { r.n.Add(1) }

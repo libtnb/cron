@@ -14,16 +14,6 @@ type JobMissedRecorder interface {
 type QueueDepthRecorder interface{ QueueDepth(n int) }
 type HookDroppedRecorder interface{ HookDropped() }
 
-// NoopRecorder implements all recorder sub-interfaces with empty methods.
-type NoopRecorder struct{}
-
-func (NoopRecorder) JobScheduled(string)                       {}
-func (NoopRecorder) JobStarted(string)                         {}
-func (NoopRecorder) JobCompleted(string, time.Duration, error) {}
-func (NoopRecorder) JobMissed(string, time.Duration)           {}
-func (NoopRecorder) QueueDepth(int)                            {}
-func (NoopRecorder) HookDropped()                              {}
-
 func recordJobScheduled(r any, name string) {
 	if x, ok := r.(JobScheduledRecorder); ok {
 		x.JobScheduled(name)

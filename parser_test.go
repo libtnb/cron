@@ -185,8 +185,13 @@ func TestParser_ParseErrors(t *testing.T) {
 		{"", "empty spec"},
 		{"* * * *", "expected 5 fields"},
 		{"60 * * * *", "above maximum"},
-		{"* * 0 * *", "below minimum"}, // dom min=1
+		{"* 24 * * *", "above maximum"}, // hour above 23
+		{"* * 0 * *", "below minimum"},  // dom min=1
+		{"* * * 13 *", "above maximum"}, // month above 12
+		{"* * * * 7", "above maximum"},  // dow above 6
 		{"5-3 * * * *", "beyond end"},
+		{"abc-3 * * * *", "not a valid number or name"}, // range LHS not numeric
+		{"1-abc * * * *", "not a valid number or name"}, // range RHS not numeric
 		{"* * * * * *", "expected 5 fields"},
 		{"@bogus", "unrecognized descriptor"},
 		{"@every nope", "invalid duration"},
@@ -253,6 +258,25 @@ func TestParser_Ext_ErrorPropagated(t *testing.T) {
 	p := NewStandardParser(WithParserExt(ext), WithDefaultLocation(time.UTC))
 	if _, err := p.Parse("anything"); !errors.Is(err, want) {
 		t.Fatalf("err = %v, want %v", err, want)
+	}
+}
+
+func TestParser_SecondsFieldErrors(t *testing.T) {
+	p := NewStandardParser(WithSeconds(), WithDefaultLocation(time.UTC))
+	cases := []string{
+		"60 * * * * *", // second above 59
+		"* 60 * * * *", // minute above 59
+		"* * 24 * * *", // hour above 23
+		"* * * 0 * *",  // dom below 1
+		"* * * * 13 *", // month above 12
+		"* * * * * 7",  // dow above 6
+	}
+	for _, spec := range cases {
+		t.Run(spec, func(t *testing.T) {
+			if _, err := p.Parse(spec); err == nil {
+				t.Fatal("expected error")
+			}
+		})
 	}
 }
 

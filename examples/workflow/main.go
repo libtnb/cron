@@ -41,11 +41,15 @@ func main() {
 		panic(err)
 	}
 
-	ctx, _ := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 	go func() {
 		time.Sleep(500 * time.Millisecond)
 		_, _ = c.TriggerByName("dag")
 	}()
 	<-ctx.Done()
-	_ = c.Stop(context.Background())
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = c.Stop(shutdownCtx)
 }

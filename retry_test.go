@@ -133,6 +133,41 @@ func TestRetryPolicy_WrapperMaxDelayCaps(t *testing.T) {
 	})
 }
 
+func TestRetryPolicy_WrapperCtxCancelDuringBackoff(t *testing.T) {
+	policy := cron.RetryPolicy{
+		MaxRetries: 5,
+		Initial:    50 * time.Millisecond,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var attempts atomic.Int32
+	job := cron.JobFunc(func(ctx context.Context) error {
+		if attempts.Add(1) == 1 {
+			go cancel()
+		}
+		return errors.New("boom")
+	})
+	err := policy.Wrapper()(job).Run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v, want context.Canceled", err)
+	}
+}
+
+func TestRetryPolicy_WrapperBackoffZeroSkipsTimer(t *testing.T) {
+	var attempts atomic.Int32
+	policy := cron.RetryPolicy{
+		MaxRetries: 3,
+		Initial:    time.Millisecond,
+		JitterFrac: 5.0, // jitter range exceeds d, can land on 0 or negative -> clamped to 0
+	}
+	_ = policy.Wrapper()(cron.JobFunc(func(ctx context.Context) error {
+		attempts.Add(1)
+		return errors.New("boom")
+	})).Run(context.Background())
+	if attempts.Load() != 4 {
+		t.Fatalf("attempts=%d, want 4", attempts.Load())
+	}
+}
+
 func TestRetryPolicy_WrapperJitterPositive(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var attempts atomic.Int32

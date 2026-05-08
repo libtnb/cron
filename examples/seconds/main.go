@@ -9,20 +9,25 @@ import (
 	"time"
 
 	"github.com/libtnb/cron"
-	"github.com/libtnb/cron/parserext"
 )
 
 func main() {
 	c := cron.New(
 		cron.WithLogger(slog.Default()),
-		cron.WithParser(parserext.NewQuartzParser(time.UTC)),
+		cron.WithParser(cron.NewStandardParser(cron.WithSeconds())),
 	)
 
-	_, err := c.Add("0 0 22 ? * 5L", cron.JobFunc(func(ctx context.Context) error {
-		fmt.Println("last Friday of the month, 22:00 UTC")
+	if _, err := c.Add("*/5 * * * * *", cron.JobFunc(func(ctx context.Context) error {
+		fmt.Println("every 5s tick", time.Now().Format(time.RFC3339))
 		return nil
-	}), cron.WithName("monthly-last-friday"))
-	if err != nil {
+	}), cron.WithName("five-second")); err != nil {
+		panic(err)
+	}
+
+	if _, err := c.Add("30 * * * * *", cron.JobFunc(func(ctx context.Context) error {
+		fmt.Println("at :30 of every minute", time.Now().Format(time.RFC3339))
+		return nil
+	}), cron.WithName("half-minute")); err != nil {
 		panic(err)
 	}
 

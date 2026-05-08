@@ -308,6 +308,38 @@ func TestCron_Running(t *testing.T) {
 	}
 }
 
+func TestCron_GlobalRetryAppliesWhenEntryDoesNotOverride(t *testing.T) {
+	var attempts atomic.Int64
+	c := cron.New(
+		cron.WithLocation(time.UTC),
+		cron.WithRetry(cron.Retry(2, cron.RetryInitial(time.Millisecond))),
+	)
+	id, err := c.AddSchedule(cron.TriggeredSchedule(),
+		cron.JobFunc(func(ctx context.Context) error {
+			attempts.Add(1)
+			return errors.New("boom")
+		}),
+		cron.WithName("retryable"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Stop(context.Background()) }()
+	if err := c.Trigger(id); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && attempts.Load() < 3 {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("attempts = %d, want 3 (initial + 2 retries from global)", attempts.Load())
+	}
+}
+
 func TestCron_StopRespectsContextDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		c := cron.New(cron.WithLocation(time.UTC))

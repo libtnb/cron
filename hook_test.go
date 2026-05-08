@@ -158,6 +158,31 @@ func TestHook_NonHookValueIgnored(t *testing.T) {
 	})
 }
 
+func TestHook_CloseRespectsCtxDeadline(t *testing.T) {
+	bh := &blockingHook{release: make(chan struct{})}
+	c := cron.New(
+		cron.WithLocation(time.UTC),
+		cron.WithHooks(bh),
+		cron.WithHookBuffer(8),
+		cron.WithLogger(slog.New(slog.DiscardHandler)),
+	)
+	id, _ := c.AddSchedule(cron.TriggeredSchedule(),
+		cron.JobFunc(func(ctx context.Context) error { return nil }))
+	_ = c.Start()
+	_ = c.Trigger(id)
+	for bh.starts.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := c.Stop(ctx)
+	close(bh.release)
+	if err == nil {
+		t.Fatal("expected ctx error from blocked hook close")
+	}
+}
+
 func TestHook_DropsWhenChannelFull(t *testing.T) {
 	bh := &blockingHook{release: make(chan struct{})}
 	r := &counterRecorder{}

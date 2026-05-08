@@ -29,9 +29,13 @@ func main() {
 	if err := c.Start(); err != nil {
 		panic(err)
 	}
-	defer func() { _ = c.Stop(context.Background()) }()
 
-	ctx, _ := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 	<-ctx.Done()
 	fmt.Println("shutting down...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = c.Stop(shutdownCtx)
 }

@@ -164,9 +164,6 @@ func (w *Workflow) validateAcyclic() error {
 	var firstCycle *ConfigError
 	var visit func(name string)
 	visit = func(name string) {
-		if firstCycle != nil {
-			return
-		}
 		color[name] = gray
 		for _, d := range w.steps[name].Deps {
 			switch color[d.Name] {
@@ -272,10 +269,6 @@ func (w *Workflow) execute(ctx context.Context) *Execution {
 			finalize(name, ResultSkipped, nil)
 			return
 		}
-		if err := ctx.Err(); err != nil {
-			finalize(name, ResultSkipped, err)
-			return
-		}
 
 		err := func() (err error) {
 			defer func() {
@@ -315,8 +308,6 @@ func (w *Workflow) execute(ctx context.Context) *Execution {
 
 func genID() string {
 	var b [16]byte
-	if _, err := crand.Read(b[:]); err != nil {
-		return "00000000000000000000000000000000"
-	}
+	_, _ = crand.Read(b[:])
 	return hex.EncodeToString(b[:])
 }

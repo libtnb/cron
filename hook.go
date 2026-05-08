@@ -58,7 +58,6 @@ type hookDispatcher struct {
 	log      *slog.Logger
 	recorder any
 	dropped  atomic.Int64
-	closed   atomic.Bool
 
 	closeOnce sync.Once
 	done      chan struct{}
@@ -99,9 +98,6 @@ func (d *hookDispatcher) invokeOne(name string, h any, fn func()) {
 }
 
 func (d *hookDispatcher) emit(fn func([]any)) {
-	if d == nil || d.ch == nil || d.closed.Load() {
-		return
-	}
 	defer func() { _ = recover() }()
 	select {
 	case d.ch <- fn:
@@ -173,7 +169,6 @@ func (d *hookDispatcher) close(ctx context.Context) error {
 		return nil
 	}
 	d.closeOnce.Do(func() {
-		d.closed.Store(true)
 		close(d.ch)
 	})
 	select {

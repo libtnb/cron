@@ -15,8 +15,7 @@ func TestOptions_AllSetters(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	c := cron.New(
 		cron.WithLocation(loc),
-		cron.WithParser(cron.NewStandardParser()),
-		cron.WithStandardParser(cron.WithSeconds()),
+		cron.WithParser(cron.NewStandardParser(cron.WithSeconds())),
 		cron.WithLogger(logger),
 		cron.WithChain(wrap.Recover(), wrap.Timeout(time.Second)),
 		cron.WithJitter(time.Millisecond),
@@ -27,7 +26,7 @@ func TestOptions_AllSetters(t *testing.T) {
 		cron.WithMaxConcurrent(4),
 		cron.WithMaxEntries(8),
 		cron.WithRetry(cron.RetryPolicy{MaxRetries: 1, Initial: time.Millisecond}),
-		cron.WithRecorder(cron.NoopRecorder{}),
+		cron.WithRecorder(struct{}{}),
 	)
 	if c == nil {
 		t.Fatal("New returned nil")
@@ -43,52 +42,31 @@ func TestOptions_AllSetters(t *testing.T) {
 	}
 }
 
-func TestWithStandardParserUsesCronLocation(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		opts []cron.Option
-	}{
-		{
-			name: "location before parser",
-			opts: []cron.Option{
-				cron.WithLocation(time.FixedZone("cron-zone", 3*60*60)),
-				cron.WithStandardParser(cron.WithSeconds()),
-			},
-		},
-		{
-			name: "location after parser",
-			opts: []cron.Option{
-				cron.WithStandardParser(cron.WithSeconds()),
-				cron.WithLocation(time.FixedZone("cron-zone", 3*60*60)),
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			c := cron.New(tc.opts...)
-			id, err := c.Add("0 0 9 * * *", cron.JobFunc(func(ctx context.Context) error { return nil }))
-			if err != nil {
-				t.Fatal(err)
-			}
-			e, ok := c.Entry(id)
-			if !ok {
-				t.Fatal("entry not found")
-			}
-			type locationProvider interface{ Location() *time.Location }
-			got := e.Schedule.(locationProvider).Location()
-			if got.String() != "cron-zone" {
-				t.Fatalf("parser location = %v, want cron-zone", got)
-			}
-		})
+func TestDefaultParser_FollowsCronLocation(t *testing.T) {
+	zone := time.FixedZone("cron-zone", 3*60*60)
+	c := cron.New(cron.WithLocation(zone))
+	id, err := c.Add("0 9 * * *", cron.JobFunc(func(ctx context.Context) error { return nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, ok := c.Entry(id)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	type locationProvider interface{ Location() *time.Location }
+	got := e.Schedule.(locationProvider).Location()
+	if got.String() != "cron-zone" {
+		t.Fatalf("parser location = %v, want cron-zone", got)
 	}
 }
 
-func TestWithStandardParserDefaultLocationOptionOverridesCronLocation(t *testing.T) {
-	override := time.FixedZone("parser-zone", -2*60*60)
+func TestExplicitParser_LocationIsIndependentOfCronLocation(t *testing.T) {
+	parserZone := time.FixedZone("parser-zone", -2*60*60)
 	c := cron.New(
 		cron.WithLocation(time.FixedZone("cron-zone", 3*60*60)),
-		cron.WithStandardParser(cron.WithSeconds(), cron.WithDefaultLocation(override)),
+		cron.WithParser(cron.NewStandardParser(cron.WithDefaultLocation(parserZone))),
 	)
-	id, err := c.Add("0 0 9 * * *", cron.JobFunc(func(ctx context.Context) error { return nil }))
+	id, err := c.Add("0 9 * * *", cron.JobFunc(func(ctx context.Context) error { return nil }))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,13 +81,13 @@ func TestWithStandardParserDefaultLocationOptionOverridesCronLocation(t *testing
 	}
 }
 
-func TestParserOptionsLastWins(t *testing.T) {
+func TestWithParser_LastWins(t *testing.T) {
 	custom := parserFunc(func(string) (cron.Schedule, error) {
 		return cron.ConstantDelay(time.Hour), nil
 	})
 
 	c := cron.New(
-		cron.WithStandardParser(cron.WithSeconds()),
+		cron.WithParser(cron.NewStandardParser(cron.WithSeconds())),
 		cron.WithParser(custom),
 	)
 	id, err := c.Add("not a standard spec", cron.JobFunc(func(ctx context.Context) error { return nil }))
@@ -126,10 +104,10 @@ func TestParserOptionsLastWins(t *testing.T) {
 
 	c = cron.New(
 		cron.WithParser(custom),
-		cron.WithStandardParser(cron.WithSeconds()),
+		cron.WithParser(cron.NewStandardParser(cron.WithSeconds())),
 	)
 	if _, err := c.Add("not a standard spec", cron.JobFunc(func(ctx context.Context) error { return nil })); err == nil {
-		t.Fatal("WithStandardParser after WithParser should restore standard parsing")
+		t.Fatal("later WithParser(standard) should restore standard parsing")
 	}
 }
 

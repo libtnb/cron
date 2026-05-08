@@ -1,11 +1,7 @@
 // Package wrap supplies Job decorators.
 package wrap
 
-import (
-	"log/slog"
-
-	"github.com/libtnb/cron"
-)
+import "log/slog"
 
 type Option func(*config)
 
@@ -17,5 +13,3 @@ type config struct {
 func WithLogger(l *slog.Logger) Option {
 	return func(c *config) { c.logger = l }
 }
-
-func Chain(wrappers ...cron.Wrapper) cron.Wrapper { return cron.Chain(wrappers...) }

@@ -12,12 +12,11 @@ type Option func(*config)
 type EntryOption func(*entryConfig)
 
 type config struct {
-	loc        *time.Location
-	parser     Parser
-	parserOpts []ParserOption
-	logger     *slog.Logger
-	chain      []Wrapper
-	jitter     time.Duration
+	loc    *time.Location
+	parser Parser
+	logger *slog.Logger
+	chain  []Wrapper
+	jitter time.Duration
 
 	hooks           []any
 	hookBuffer      int
@@ -43,22 +42,9 @@ func WithLocation(loc *time.Location) Option {
 	return func(c *config) { c.loc = loc }
 }
 
-// WithParser installs a custom parser and disables standard parser options.
+// WithParser installs a parser.
 func WithParser(p Parser) Option {
-	return func(c *config) {
-		c.parser = p
-		c.parserOpts = nil
-	}
-}
-
-// WithStandardParser configures the standard parser. Cron's location is used
-// unless opts include WithDefaultLocation.
-func WithStandardParser(opts ...ParserOption) Option {
-	copied := append([]ParserOption(nil), opts...)
-	return func(c *config) {
-		c.parser = nil
-		c.parserOpts = copied
-	}
+	return func(c *config) { c.parser = p }
 }
 
 // WithLogger sets the slog.Logger. Default slog.Default().

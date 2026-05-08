@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -52,57 +53,11 @@ func TestBetween(t *testing.T) {
 	}
 }
 
-func TestBetweenWithLimit(t *testing.T) {
-	s := mustParse(t, "@hourly")
-	start := t0(2026, 1, 1, 0, 30, 0)
-	end := t0(2026, 1, 1, 23, 30, 0)
-	got := BetweenWithLimit(s, start, end, 3)
-	if len(got) != 3 {
-		t.Fatalf("len = %d, want 3", len(got))
-	}
-}
-
 func TestBetween_StartAfterEnd(t *testing.T) {
 	s := mustParse(t, "@hourly")
 	got := Between(s, t0(2026, 1, 2, 0, 0, 0), t0(2026, 1, 1, 0, 0, 0))
 	if got != nil {
 		t.Fatalf("got %v", got)
-	}
-}
-
-func TestCount(t *testing.T) {
-	s := mustParse(t, "@hourly")
-	start := t0(2026, 1, 1, 0, 30, 0)
-	end := t0(2026, 1, 2, 0, 30, 0)
-	if got := Count(s, start, end); got != 24 {
-		t.Fatalf("Count = %d, want 24", got)
-	}
-	if got := CountWithLimit(s, start, end, 5); got != 5 {
-		t.Fatalf("CountWithLimit = %d, want 5", got)
-	}
-}
-
-func TestMatches(t *testing.T) {
-	s := mustParse(t, "@hourly")
-	if !Matches(s, t0(2026, 1, 1, 5, 0, 0)) {
-		t.Fatal("hourly should match XX:00:00")
-	}
-	if Matches(s, t0(2026, 1, 1, 5, 30, 0)) {
-		t.Fatal("hourly should not match XX:30:00")
-	}
-}
-
-func TestUpcomingSeq_BreaksEarly(t *testing.T) {
-	s := mustParse(t, "@hourly")
-	count := 0
-	for range UpcomingSeq(s, t0(2026, 1, 1, 0, 0, 0)) {
-		count++
-		if count == 3 {
-			break
-		}
-	}
-	if count != 3 {
-		t.Fatalf("count = %d", count)
 	}
 }
 
@@ -112,7 +67,7 @@ func TestUpcomingSeq_UsesSchedulesUpcomingWhenAvailable(t *testing.T) {
 		t.Fatal("SpecSchedule should implement Upcoming")
 	}
 	count := 0
-	for range UpcomingSeq(s, t0(2026, 1, 1, 0, 0, 0)) {
+	for range upcomingSeq(s, t0(2026, 1, 1, 0, 0, 0)) {
 		count++
 		if count == 5 {
 			break
@@ -120,5 +75,28 @@ func TestUpcomingSeq_UsesSchedulesUpcomingWhenAvailable(t *testing.T) {
 	}
 	if count != 5 {
 		t.Fatalf("count = %d", count)
+	}
+}
+
+type exhaustingSchedule struct{ n atomic.Int32 }
+
+func (s *exhaustingSchedule) Next(now time.Time) time.Time {
+	if s.n.Add(1) > 3 {
+		return time.Time{}
+	}
+	return now.Add(time.Hour)
+}
+
+func TestUpcomingSeq_FallbackTerminatesOnZero(t *testing.T) {
+	s := &exhaustingSchedule{}
+	if _, ok := any(s).(Upcoming); ok {
+		t.Fatal("test schedule should not implement Upcoming")
+	}
+	count := 0
+	for range upcomingSeq(s, t0(2026, 1, 1, 0, 0, 0)) {
+		count++
+	}
+	if count != 3 {
+		t.Fatalf("count = %d, want 3", count)
 	}
 }

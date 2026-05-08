@@ -248,23 +248,6 @@ func TestRetry_CanceledContextSkipsAttempt(t *testing.T) {
 	}
 }
 
-func TestChain_ReExportEquivalent(t *testing.T) {
-	var seen []string
-	mk := func(s string) cron.Wrapper {
-		return func(j cron.Job) cron.Job {
-			return cron.JobFunc(func(ctx context.Context) error {
-				seen = append(seen, s)
-				return j.Run(ctx)
-			})
-		}
-	}
-	core := cron.JobFunc(func(ctx context.Context) error { seen = append(seen, "core"); return nil })
-	_ = wrap.Chain(mk("a"), mk("b"))(core).Run(context.Background())
-	if got := len(seen); got != 3 || seen[0] != "a" || seen[1] != "b" || seen[2] != "core" {
-		t.Fatalf("seen = %v", seen)
-	}
-}
-
 func TestRecover_UsesCustomLogger(t *testing.T) {
 	logged := false
 	h := slogHandlerFunc(func(_ context.Context, _ slog.Record) error {

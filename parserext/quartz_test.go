@@ -369,6 +369,30 @@ func TestQuartzParser_ParsePartBranches(t *testing.T) {
 	}
 }
 
+func TestQuartzParser_FieldErrors(t *testing.T) {
+	p := parserext.NewQuartzParser(time.UTC)
+	cases := []struct {
+		spec  string
+		field string
+	}{
+		{"99 0 L * ?", "minute"},
+		{"0 99 L * ?", "hour"},
+		{"0 0 L 99 ?", "month"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.field, func(t *testing.T) {
+			_, err := p.Parse(tc.spec)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			var pe *cron.ParseError
+			if !errors.As(err, &pe) || pe.Field != tc.field {
+				t.Fatalf("err=%v, want %s ParseError", err, tc.field)
+			}
+		})
+	}
+}
+
 func TestQuartzParser_SecondsFieldError(t *testing.T) {
 	p := parserext.NewQuartzParser(time.UTC)
 	_, err := p.Parse("99 0 0 L * ?")

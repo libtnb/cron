@@ -1,5 +1,13 @@
 # cron
 
+[![Doc](https://pkg.go.dev/badge/github.com/libtnb/cron)](https://pkg.go.dev/github.com/libtnb/cron)
+[![Go](https://img.shields.io/github/go-mod/go-version/libtnb/cron)](https://go.dev/)
+[![Release](https://img.shields.io/github/release/libtnb/cron.svg)](https://github.com/libtnb/cron/releases)
+[![Test](https://github.com/libtnb/cron/actions/workflows/test.yml/badge.svg)](https://github.com/libtnb/cron/actions)
+[![Report Card](https://goreportcard.com/badge/github.com/libtnb/cron)](https://goreportcard.com/report/github.com/libtnb/cron)
+[![Stars](https://img.shields.io/github/stars/libtnb/cron?style=flat)](https://github.com/libtnb/cron)
+[![License](https://img.shields.io/github/license/libtnb/cron)](https://opensource.org/license/MIT)
+
 A modern, focused Go cron scheduler with no third-party dependencies.
 
 ## Install
@@ -78,7 +86,7 @@ normally — useful for "catch up after restart" semantics.
 ```go
 c := cron.New(
 	cron.WithLocation(time.UTC),
-	cron.WithStandardParser(cron.WithSeconds()),
+	cron.WithParser(cron.NewStandardParser(cron.WithSeconds())),
 	cron.WithMissedFire(cron.MissedRunOnce),
 	cron.WithMaxConcurrent(32),
 	cron.WithRetry(cron.Retry(3, cron.RetryInitial(time.Second))),
@@ -196,19 +204,19 @@ _, _ = c.Add("0 30 22 ? * 5L", payrollJob) // last Friday
 
 ## Migrating from robfig/cron
 
-| robfig/cron                        | libtnb/cron                                             |
-|------------------------------------|---------------------------------------------------------|
-| `cron.New(cron.WithSeconds())`     | `cron.New(cron.WithStandardParser(cron.WithSeconds()))` |
-| `Job.Run()`                        | `Job.Run(context.Context) error`                        |
-| `c.AddFunc(spec, func())`          | `c.Add(spec, cron.JobFunc(func(ctx) error { ... }))`    |
-| `cron.WithLogger(custom)`          | `cron.WithLogger(*slog.Logger)`                         |
-| `cron.Recover(logger)`             | `wrap.Recover(wrap.WithLogger(logger))`                 |
-| `cron.SkipIfStillRunning(logger)`  | `wrap.SkipIfRunning()`                                  |
-| `cron.DelayIfStillRunning(logger)` | `wrap.DelayIfRunning()`                                 |
-| `c.Start()`                        | `c.Start() error`                                       |
-| `c.Stop()`                         | `c.Stop(ctx) error`                                     |
-| `c.Entries()`                      | `c.Entries()` as `iter.Seq[Entry]`                      |
-| Panic-oriented registration        | Explicit `error` returns                                |
+| robfig/cron                        | libtnb/cron                                                             |
+|------------------------------------|-------------------------------------------------------------------------|
+| `cron.New(cron.WithSeconds())`     | `cron.New(cron.WithParser(cron.NewStandardParser(cron.WithSeconds())))` |
+| `Job.Run()`                        | `Job.Run(context.Context) error`                                        |
+| `c.AddFunc(spec, func())`          | `c.Add(spec, cron.JobFunc(func(ctx) error { ... }))`                    |
+| `cron.WithLogger(custom)`          | `cron.WithLogger(*slog.Logger)`                                         |
+| `cron.Recover(logger)`             | `wrap.Recover(wrap.WithLogger(logger))`                                 |
+| `cron.SkipIfStillRunning(logger)`  | `wrap.SkipIfRunning()`                                                  |
+| `cron.DelayIfStillRunning(logger)` | `wrap.DelayIfRunning()`                                                 |
+| `c.Start()`                        | `c.Start() error`                                                       |
+| `c.Stop()`                         | `c.Stop(ctx) error`                                                     |
+| `c.Entries()`                      | `c.Entries()` as `iter.Seq[Entry]`                                      |
+| Panic-oriented registration        | Explicit `error` returns                                                |
 
 ## Credits
 

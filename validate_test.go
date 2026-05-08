@@ -33,6 +33,13 @@ func TestValidateSpec_NilParser(t *testing.T) {
 	}
 }
 
+func TestAnalyzeSpec_NilParser(t *testing.T) {
+	a := AnalyzeSpecWith("@hourly", nil, t0(2026, 1, 1, 0, 0, 0))
+	if a.Valid || a.Err == nil {
+		t.Fatalf("Valid=%v Err=%v", a.Valid, a.Err)
+	}
+}
+
 func TestAnalyzeSpec_Descriptor(t *testing.T) {
 	now := t0(2026, 1, 1, 12, 0, 0)
 	a := AnalyzeSpec("@every 30s", now)
