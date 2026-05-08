@@ -13,6 +13,8 @@ import (
 	"github.com/libtnb/cron"
 )
 
+func noop(ctx context.Context) error { return nil }
+
 func TestCron_NewIsIdle(t *testing.T) {
 	c := cron.New()
 	if e, ok := c.Entry(1); ok {
@@ -432,7 +434,21 @@ func TestCron_Entries_OrderedByNext(t *testing.T) {
 	}
 }
 
-func noop(ctx context.Context) error { return nil }
+func TestCron_Entries_TriggeredEntriesSortLast(t *testing.T) {
+	c := cron.New(cron.WithLocation(time.UTC))
+	_, _ = c.AddSchedule(cron.TriggeredSchedule(), cron.JobFunc(noop), cron.WithName("manual"))
+	_, _ = c.Add("@every 1m", cron.JobFunc(noop), cron.WithName("auto"))
+	got := slices.Collect(c.Entries())
+	if len(got) != 2 {
+		t.Fatalf("len = %d", len(got))
+	}
+	if got[0].Name != "auto" || got[1].Name != "manual" {
+		t.Fatalf("order = [%q, %q], want [auto, manual]", got[0].Name, got[1].Name)
+	}
+	if !got[1].Next.IsZero() {
+		t.Fatalf("triggered entry Next should be zero, got %v", got[1].Next)
+	}
+}
 
 func TestCron_MissedRunOnce_FiresFirstMissedWhenOnlyOneMissed(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {

@@ -52,6 +52,56 @@ func TestParser_WithSeconds(t *testing.T) {
 	}
 }
 
+func TestParser_WithSeconds_AcceptsFiveFields(t *testing.T) {
+	p := NewStandardParser(WithSeconds(), WithDefaultLocation(time.UTC))
+	s, err := p.Parse("*/5 * * * *")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// 5-field spec implies second=0; first firing aligns to the next minute boundary
+	// matching the */5 minute pattern.
+	got := s.Next(t0(2026, 1, 1, 0, 0, 30))
+	if want := t0(2026, 1, 1, 0, 5, 0); !got.Equal(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestParser_WithSecondsFalseIsEquivalentToOptional(t *testing.T) {
+	p := NewStandardParser(WithSeconds(false), WithDefaultLocation(time.UTC))
+	if _, err := p.Parse("0 0 * * *"); err != nil {
+		t.Fatalf("5-field should parse: %v", err)
+	}
+	if _, err := p.Parse("0 0 0 * * *"); err != nil {
+		t.Fatalf("6-field should parse: %v", err)
+	}
+}
+
+func TestParser_WithSecondsStrictRejectsFiveFields(t *testing.T) {
+	p := NewStandardParser(WithSeconds(true), WithDefaultLocation(time.UTC))
+	_, err := p.Parse("*/5 * * * *")
+	if err == nil {
+		t.Fatal("strict mode should reject 5-field spec")
+	}
+	var pe *ParseError
+	if !errors.As(err, &pe) || !strings.Contains(err.Error(), "expected 6 fields") {
+		t.Fatalf("err = %v, want 'expected 6 fields' ParseError", err)
+	}
+	if _, err := p.Parse("0 */5 * * * *"); err != nil {
+		t.Fatalf("strict mode should still accept 6-field spec: %v", err)
+	}
+}
+
+func TestParser_DefaultRejectsSixFields(t *testing.T) {
+	p := NewStandardParser(WithDefaultLocation(time.UTC))
+	_, err := p.Parse("0 */5 * * * *")
+	if err == nil {
+		t.Fatal("default parser should reject 6-field spec")
+	}
+	if !strings.Contains(err.Error(), "expected 5 fields") {
+		t.Fatalf("err = %v, want 'expected 5 fields'", err)
+	}
+}
+
 func TestParser_Descriptors(t *testing.T) {
 	p := utcParser
 	from := t0(2026, 6, 15, 12, 30, 0)

@@ -13,9 +13,16 @@ const starBit = uint64(1) << 63
 // ParserOption configures NewStandardParser.
 type ParserOption func(*parserConfig)
 
-// WithSeconds enables a leading seconds field (6-field form).
-func WithSeconds() ParserOption {
-	return func(c *parserConfig) { c.seconds = true }
+// WithSeconds enables a leading seconds field. By default the parser accepts
+// both 5- and 6-field specs (a 5-field spec is parsed with second=0). Pass
+// true to require exactly 6 fields.
+func WithSeconds(strict ...bool) ParserOption {
+	return func(c *parserConfig) {
+		c.seconds = true
+		if len(strict) > 0 && strict[0] {
+			c.secondsStrict = true
+		}
+	}
 }
 
 // WithParserExt installs a pre-parse hook. Returning (nil, nil) falls through
@@ -31,9 +38,10 @@ func WithDefaultLocation(loc *time.Location) ParserOption {
 }
 
 type parserConfig struct {
-	seconds    bool
-	ext        Parser
-	defaultLoc *time.Location
+	seconds       bool
+	secondsStrict bool
+	ext           Parser
+	defaultLoc    *time.Location
 }
 
 // StandardParser is stateless and concurrent-safe.
@@ -94,21 +102,14 @@ func (p *StandardParser) Parse(spec string) (Schedule, error) {
 	}
 
 	fields := strings.Fields(spec)
-	want := 5
-	if p.cfg.seconds {
-		want = 6
-	}
-	if len(fields) != want {
-		return nil, &ParseError{
-			Spec:   spec,
-			Pos:    -1,
-			Reason: "expected " + strconv.Itoa(want) + " fields, got " + strconv.Itoa(len(fields)),
-		}
+	hasSeconds, err := p.expectFieldCount(spec, len(fields))
+	if err != nil {
+		return nil, err
 	}
 
 	idx := 0
 	var sec uint64
-	if p.cfg.seconds {
+	if hasSeconds {
 		v, err := getField(spec, "second", fields[idx], boundsSecond)
 		if err != nil {
 			return nil, err
@@ -152,6 +153,41 @@ func (p *StandardParser) Parse(spec string) (Schedule, error) {
 		dow:    dow,
 		loc:    loc,
 	}, nil
+}
+
+// expectFieldCount validates n against the parser's seconds mode and reports
+// whether the spec carries a leading seconds field.
+func (p *StandardParser) expectFieldCount(spec string, n int) (bool, error) {
+	switch {
+	case p.cfg.seconds && p.cfg.secondsStrict:
+		if n != 6 {
+			return false, &ParseError{
+				Spec: spec, Pos: -1,
+				Reason: "expected 6 fields, got " + strconv.Itoa(n),
+			}
+		}
+		return true, nil
+	case p.cfg.seconds:
+		switch n {
+		case 5:
+			return false, nil
+		case 6:
+			return true, nil
+		default:
+			return false, &ParseError{
+				Spec: spec, Pos: -1,
+				Reason: "expected 5 or 6 fields, got " + strconv.Itoa(n),
+			}
+		}
+	default:
+		if n != 5 {
+			return false, &ParseError{
+				Spec: spec, Pos: -1,
+				Reason: "expected 5 fields, got " + strconv.Itoa(n),
+			}
+		}
+		return false, nil
+	}
 }
 
 func (p *StandardParser) parseDescriptor(spec string, loc *time.Location) (Schedule, error) {

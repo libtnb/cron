@@ -16,7 +16,7 @@ A modern, focused Go cron scheduler with no third-party dependencies.
 go get github.com/libtnb/cron
 ```
 
-## Quick Start
+## Quick start
 
 ```go
 package main
@@ -59,29 +59,34 @@ func main() {
 
 ## Packages
 
-| Path                               | Purpose                                                                             |
-|------------------------------------|-------------------------------------------------------------------------------------|
-| `github.com/libtnb/cron`           | Scheduler, parser, schedules, hooks, recorders, retry policy.                       |
-| `github.com/libtnb/cron/wrap`      | Job wrappers: `Recover`, `Timeout`, `SkipIfRunning`, `DelayIfRunning`, `Retry`.     |
-| `github.com/libtnb/cron/workflow`  | DAG jobs with `OnSuccess`, `OnFailure`, `OnSkipped`, and `OnComplete` dependencies. |
-| `github.com/libtnb/cron/parserext` | Optional Quartz-style parser for `L`, `N#M`, and `NL` expressions.                  |
+| Path                               | Purpose                                                                         |
+|------------------------------------|---------------------------------------------------------------------------------|
+| `github.com/libtnb/cron`           | Scheduler, parser, schedules, hooks, recorders, retry policy.                   |
+| `github.com/libtnb/cron/wrap`      | Job wrappers: `Recover`, `Timeout`, `SkipIfRunning`, `DelayIfRunning`, `Retry`. |
+| `github.com/libtnb/cron/workflow`  | DAG jobs with `OnSuccess`, `OnFailure`, `OnSkipped`, `OnComplete`.              |
+| `github.com/libtnb/cron/parserext` | Quartz tokens (`L`, `N#M`, `NL`).                                               |
 
-## Core API
+## Specs
 
-The default parser accepts five fields:
+Five fields:
 
 ```text
 minute hour day-of-month month day-of-week
 ```
 
-Descriptors such as `@hourly`, `@daily`, `@every 10s`, `TZ=...`, and
-`CRON_TZ=...` are supported. Use `WithSeconds` for a leading seconds field.
+Plus descriptors `@hourly`, `@daily`, `@every 10s`, and the `TZ=` /
+`CRON_TZ=` prefixes.
 
-`WithMissedFire` controls behaviour when a firing is later than
-`WithMissedTolerance` (default 1s). `MissedSkip` (the default) drops the
-overdue firing and waits for the next scheduled time. `MissedRunOnce`
-runs the job once for the most recent missed firing, then resumes
-normally — useful for "catch up after restart" semantics.
+`WithSeconds()` adds an optional leading seconds field. Both 5- and 6-field
+specs parse; a 5-field spec means `second=0`. Pass `WithSeconds(true)` to
+require six.
+
+## Missed fires
+
+If a firing runs late by more than `WithMissedTolerance` (default `1s`):
+
+- `MissedSkip` (default) drops it and waits for the next scheduled time.
+- `MissedRunOnce` runs the job once at the most recent missed time, then resumes.
 
 ```go
 c := cron.New(
@@ -100,21 +105,15 @@ id, err := c.Add(
 )
 ```
 
-Schedules can also be registered directly:
+For a programmatic schedule:
 
 ```go
 id, err := c.AddSchedule(cron.ConstantDelay(time.Hour), job)
 ```
 
-Runtime control is explicit. `Trigger` returns `ErrEntryNotFound`,
-`ErrSchedulerNotRunning`, or `ErrConcurrencyLimit` so the caller can
-distinguish failure modes:
+## Triggering and removal
 
 ```go
-if err := c.Start(); err != nil {
-	panic(err)
-}
-
 if err := c.Trigger(id); err != nil {
 	switch {
 	case errors.Is(err, cron.ErrEntryNotFound):
@@ -125,16 +124,18 @@ if err := c.Trigger(id); err != nil {
 
 count, err := c.TriggerByName("daily-digest") // err joins per-entry failures
 
-c.Remove(id) // returns bool: false if id is unknown
+c.Remove(id) // false if id is unknown
 
 _ = c.Stop(shutdownCtx)
 ```
 
-`Remove` prevents future automatic fires and future manual triggers for that
-entry. Jobs already dispatched continue running. `Stop` stops scheduling and
-waits for in-flight jobs and hooks until its context is done.
+`Remove` blocks future fires and future `Trigger` calls. Jobs already dispatched
+keep running. `Stop` halts the loop and waits for in-flight jobs and the hook
+dispatcher, capped by the context.
 
-Read APIs return copied views:
+## Reading entries
+
+`Entry` and `Entries` return copies and never block.
 
 ```go
 if entry, ok := c.Entry(id); ok {
@@ -146,24 +147,23 @@ for e := range c.Entries() {
 }
 ```
 
-Schedule helpers are available without running a scheduler:
+## Schedule helpers
+
+These work on any `Schedule` without a running scheduler:
 
 ```go
 next := cron.NextN(schedule, time.Now(), 10)
 window := cron.Between(schedule, start, end)
-matched := cron.Matches(schedule, t)
 ```
 
-Hooks and recorders are split into small sub-interfaces
-(`ScheduleHook`, `JobStartHook`, `JobCompleteHook`, `MissedHook` for
-hooks; `JobScheduledRecorder`, `JobStartedRecorder`, ...
-for recorders). The dispatcher type-asserts each subscriber and calls
-only the methods it actually implements — no need for empty stubs:
+## Hooks and recorders
+
+Hook and recorder interfaces are split per event. A subscriber implements only
+the methods it cares about:
 
 ```go
 type metrics struct{}
 
-// Implements JobCompleteHook only — the other 3 events are skipped.
 func (*metrics) OnJobComplete(e cron.EventJobComplete) {
 	// record duration, error, etc.
 }
@@ -171,12 +171,15 @@ func (*metrics) OnJobComplete(e cron.EventJobComplete) {
 c := cron.New(cron.WithHooks(&metrics{}))
 ```
 
+The four hook interfaces are `ScheduleHook`, `JobStartHook`, `JobCompleteHook`,
+`MissedHook`. Recorder interfaces follow the same pattern (`JobScheduledRecorder`,
+`JobStartedRecorder`, ...).
+
 ## Workflow
 
-`workflow.Workflow` is a `cron.Job`, so a DAG can be scheduled like any other
-job. Use `New` for config-driven graphs (returns `error` you can inspect with
-`errors.Is` against `ErrDuplicateStep` / `ErrUnknownDep` / `ErrCycle`), or
-`MustNew` for static graphs where a misconfiguration is a programmer error.
+`workflow.Workflow` is a `cron.Job`, so a DAG schedules like anything else.
+`workflow.New` returns an error (`ErrDuplicateStep` / `ErrUnknownDep` /
+`ErrCycle`); `workflow.MustNew` panics on misconfiguration.
 
 ```go
 w := workflow.MustNew(
@@ -189,10 +192,9 @@ w := workflow.MustNew(
 _, _ = c.Add("@hourly", w, cron.WithName("etl"))
 ```
 
-## Quartz Parser
+## Quartz tokens
 
-The optional Quartz parser forwards ordinary specs to the standard parser and
-adds support for last day, nth weekday, and last weekday forms.
+`parserext.NewQuartzParser` accepts standard specs plus `L`, `N#M`, and `NL`.
 
 ```go
 c := cron.New(cron.WithParser(parserext.NewQuartzParser(time.UTC)))
@@ -216,7 +218,6 @@ _, _ = c.Add("0 30 22 ? * 5L", payrollJob) // last Friday
 | `c.Start()`                        | `c.Start() error`                                                       |
 | `c.Stop()`                         | `c.Stop(ctx) error`                                                     |
 | `c.Entries()`                      | `c.Entries()` as `iter.Seq[Entry]`                                      |
-| Panic-oriented registration        | Explicit `error` returns                                                |
 
 ## Credits
 

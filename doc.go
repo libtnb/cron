@@ -1,13 +1,14 @@
-// Package cron provides a modern, focused Go cron scheduler.
+// Package cron is a cron scheduler.
 //
-// Jobs implement Job and are registered with Add or AddSchedule. The
-// scheduler is explicit: call Start to run it and Stop to cancel and drain
-// in-flight work. Standard specs use five fields by default; pass
-// WithParser(NewStandardParser(WithSeconds())) for a leading seconds field.
+// Register jobs with Add or AddSchedule, then call Start. Stop cancels the
+// loop and waits for in-flight jobs, capped by its context.
+//
+// Specs use five fields. WithSeconds adds an optional leading seconds field;
+// WithSeconds(true) requires six.
 //
 // # Subpackages
 //
-//   - wrap - Job decorators such as Recover, Timeout, SkipIfRunning, and Retry.
-//   - workflow - DAG orchestration with conditional dependencies.
-//   - parserext - Optional Quartz-style parser with L, N#M, NL support.
+//   - wrap: job wrappers (Recover, Timeout, SkipIfRunning, DelayIfRunning, Retry).
+//   - workflow: DAG jobs with conditional dependencies.
+//   - parserext: Quartz tokens (L, N#M, NL).
 package cron
