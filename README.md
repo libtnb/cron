@@ -299,3 +299,7 @@ convention.
 ## Credits
 
 - [robfig/cron](https://github.com/robfig/cron)
+
+## License
+
+See [LICENSE](LICENSE).
