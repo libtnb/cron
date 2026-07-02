@@ -12,11 +12,13 @@ type Option func(*config)
 type EntryOption func(*entryConfig)
 
 type config struct {
-	loc    *time.Location
-	parser Parser
-	logger *slog.Logger
-	chain  []Wrapper
-	jitter time.Duration
+	loc          *time.Location
+	locSet       bool
+	parser       Parser
+	secondsField bool
+	logger       *slog.Logger
+	chain        []Wrapper
+	jitter       time.Duration
 
 	hooks           []any
 	hookBuffer      int
@@ -38,13 +40,21 @@ type entryConfig struct {
 }
 
 // WithLocation sets the default schedule timezone. Default is time.Local.
+// Ignored when WithParser is set: a custom parser owns its timezone.
 func WithLocation(loc *time.Location) Option {
-	return func(c *config) { c.loc = loc }
+	return func(c *config) { c.loc = loc; c.locSet = true }
 }
 
-// WithParser installs a parser.
+// WithParser installs a parser. It takes over timezone resolution, so
+// WithLocation and WithSecondsField no longer apply.
 func WithParser(p Parser) Option {
 	return func(c *config) { c.parser = p }
+}
+
+// WithSecondsField enables a leading seconds field in the built-in parser, so
+// the common seconds + WithLocation case composes without WithParser.
+func WithSecondsField() Option {
+	return func(c *config) { c.secondsField = true }
 }
 
 // WithLogger sets the slog.Logger. Default slog.Default().

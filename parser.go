@@ -370,7 +370,9 @@ func getRange(spec, name, expr string, b boundary) (uint64, error) {
 			Reason: "beginning of range " + strconv.Itoa(int(start)) + " beyond end " + strconv.Itoa(int(end))}
 	}
 
-	for v := start; v <= end; v += step {
+	// Iterate in uint64 so a huge step near 2^32 cannot wrap on 32-bit
+	// platforms (where uint is 32-bit) and set spurious bits; v stays <= 59.
+	for v := uint64(start); v <= uint64(end); v += uint64(step) {
 		bits |= 1 << v
 	}
 	return bits | extra, nil

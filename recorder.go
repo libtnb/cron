@@ -3,6 +3,12 @@ package cron
 import "time"
 
 // Recorder sub-interfaces. WithRecorder subscribers may implement any subset.
+//
+// Unlike hooks, recorder methods are not serialized: they are called inline and
+// concurrently from job goroutines, the scheduler loop, and Add/Remove/Trigger
+// callers. Implementations must be safe for concurrent use and must not block —
+// a slow recorder on the loop path delays scheduling.
+
 type JobScheduledRecorder interface{ JobScheduled(name string) }
 type JobStartedRecorder interface{ JobStarted(name string) }
 type JobCompletedRecorder interface {

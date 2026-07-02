@@ -138,3 +138,34 @@ func TestSpecSchedule_LogValue(t *testing.T) {
 	s := mustParseSpec(t, "@hourly")
 	_ = s.LogValue()
 }
+
+// TestSpecSchedule_DST_SpringForward_FiresSameDay pins the regression: before
+// the fix, absolute-duration hour jumps overshot the spring-forward gap and
+// skipped the whole day (e.g. "0 5 * * *" fired 2026-03-09 instead of 03-08).
+func TestSpecSchedule_DST_SpringForward_FiresSameDay(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip("tzdata missing:", err)
+	}
+	p := NewStandardParser(WithDefaultLocation(loc))
+	from := time.Date(2026, 3, 8, 0, 30, 0, 0, loc)
+	cases := []struct {
+		spec string
+		want time.Time
+	}{
+		{"0 3 * * *", time.Date(2026, 3, 8, 3, 0, 0, 0, loc)},
+		{"0 5 * * *", time.Date(2026, 3, 8, 5, 0, 0, 0, loc)},
+		{"0 9,18 * * *", time.Date(2026, 3, 8, 9, 0, 0, 0, loc)},
+		// 02:30 does not exist on 2026-03-08 (02:00->03:00), so it rolls forward.
+		{"30 2 * * *", time.Date(2026, 3, 9, 2, 30, 0, 0, loc)},
+	}
+	for _, c := range cases {
+		s, err := p.Parse(c.spec)
+		if err != nil {
+			t.Fatalf("%s: %v", c.spec, err)
+		}
+		if got := s.Next(from); !got.Equal(c.want) {
+			t.Errorf("%q: got %v, want %v", c.spec, got, c.want)
+		}
+	}
+}

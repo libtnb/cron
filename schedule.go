@@ -21,12 +21,20 @@ type Parser interface {
 	Parse(spec string) (Schedule, error)
 }
 
-// ConstantDelay is a fixed-interval Schedule.
+// ConstantDelay is a fixed-interval Schedule. The interval has a 1s floor:
+// sub-second durations fire every 1s. Whole-second intervals are aligned to
+// the second boundary; fractional intervals (e.g. 1500ms) keep their exact
+// period.
 type ConstantDelay time.Duration
 
 func (d ConstantDelay) Next(now time.Time) time.Time {
 	delay := max(time.Duration(d), time.Second)
-	delay -= time.Duration(now.Nanosecond()) * time.Nanosecond
+	// Only snap to the second boundary for whole-second periods. Subtracting the
+	// sub-second phase from a fractional period (e.g. 1.5s) collapses every
+	// interval after the first to floor(d), firing far more often than asked.
+	if delay%time.Second == 0 {
+		delay -= time.Duration(now.Nanosecond()) * time.Nanosecond
+	}
 	return now.Add(delay)
 }
 

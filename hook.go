@@ -59,6 +59,7 @@ type hookDispatcher struct {
 	recorder any
 	dropped  atomic.Int64
 
+	startOnce sync.Once
 	closeOnce sync.Once
 	done      chan struct{}
 }
@@ -74,8 +75,13 @@ func newHookDispatcher(hooks []any, log *slog.Logger, recorder any, bufSize int)
 	d.hooks = hooks
 	d.ch = make(chan func([]any), bufSize)
 	d.done = make(chan struct{})
-	go d.loop()
 	return d
+}
+
+// ensureLoop starts the delivery goroutine on first use, so a hooked Cron that
+// never emits (abandoned before Start) leaks no goroutine.
+func (d *hookDispatcher) ensureLoop() {
+	d.startOnce.Do(func() { go d.loop() })
 }
 
 func (d *hookDispatcher) loop() {
@@ -99,6 +105,7 @@ func (d *hookDispatcher) invokeOne(name string, h any, fn func()) {
 
 func (d *hookDispatcher) emit(fn func([]any)) {
 	defer func() { _ = recover() }()
+	d.ensureLoop()
 	select {
 	case d.ch <- fn:
 	default:
@@ -168,6 +175,7 @@ func (d *hookDispatcher) close(ctx context.Context) error {
 	if d == nil || d.ch == nil {
 		return nil
 	}
+	d.ensureLoop()
 	d.closeOnce.Do(func() {
 		close(d.ch)
 	})

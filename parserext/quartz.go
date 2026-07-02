@@ -372,7 +372,9 @@ func parsePart(part string, lo, hi uint) (uint64, error) {
 		return 0, errors.New("range start > end in " + strconv.Quote(part))
 	}
 	var bm uint64
-	for v := start; v <= end; v += step {
+	// Iterate in uint64 so a huge step near 2^32 cannot wrap on 32-bit
+	// platforms and set spurious bits; v stays <= 59.
+	for v := uint64(start); v <= uint64(end); v += uint64(step) {
 		bm |= 1 << v
 	}
 	return bm, nil

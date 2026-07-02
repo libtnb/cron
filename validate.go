@@ -55,7 +55,10 @@ func AnalyzeSpecWith(spec string, p Parser, now time.Time) SpecAnalysis {
 	res.Descriptor = extractDescriptor(spec)
 
 	if v, ok := s.(ConstantDelay); ok {
-		res.Interval = time.Duration(v)
+		// Report the effective interval: ConstantDelay enforces a 1s floor, so a
+		// sub-second @every fires every 1s. Reporting the raw duration would
+		// contradict the actual cadence.
+		res.Interval = max(time.Duration(v), time.Second)
 	}
 	// Duck-typed so validate.go does not import parserext.
 	type locationProvider interface{ Location() *time.Location }

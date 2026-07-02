@@ -4,7 +4,6 @@ import (
 	"context"
 	"iter"
 	"log/slog"
-	"maps"
 	mathrand "math/rand/v2"
 	"slices"
 	"sync"
@@ -27,9 +26,11 @@ type entry struct {
 	prev time.Time
 
 	item *heap.Item[*entry] // nil iff not in the heap
+	view *viewCell          // snapshot cell, stable for the entry's lifetime
 }
 
-// viewCell lets Entry reads stay lock-free while writers swap snapshots.
+// viewCell holds an entry's published snapshot. Fires swap the value with an
+// atomic store; Add/Remove mutate the enclosing map under viewMu.
 type viewCell struct {
 	p atomic.Pointer[Entry]
 }
@@ -55,11 +56,13 @@ type Cron struct {
 	cfg        config
 	parseCache parsecache.Cache[Schedule]
 
-	mu      sync.Mutex              // guards h, byEntry, view publishing
-	h       *heap.Heap[*entry]      // scheduling heap
-	byEntry map[EntryID]*entry      // canonical entry table
-	views   atomic.Pointer[viewMap] // outer view map (rebuilt under mu)
+	mu      sync.Mutex         // guards h, byEntry
+	h       *heap.Heap[*entry] // scheduling heap
+	byEntry map[EntryID]*entry // canonical entry table
 	nextID  atomic.Uint64
+
+	viewMu sync.RWMutex // guards the views map structure; cell values are atomic
+	views  viewMap      // snapshot map read by Entry/Entries
 
 	hooks *hookDispatcher
 
@@ -85,51 +88,47 @@ func New(opts ...Option) *Cron {
 	if cfg.loc == nil {
 		cfg.loc = time.Local
 	}
+	if cfg.logger == nil {
+		cfg.logger = slog.Default()
+	}
 	if cfg.parser == nil {
-		cfg.parser = NewStandardParser(WithDefaultLocation(cfg.loc))
+		popts := []ParserOption{WithDefaultLocation(cfg.loc)}
+		if cfg.secondsField {
+			popts = append(popts, WithSeconds())
+		}
+		cfg.parser = NewStandardParser(popts...)
+	} else if cfg.locSet {
+		cfg.logger.Warn("cron: WithLocation ignored; the parser from WithParser controls the timezone")
 	}
 	if cfg.missedTolerance <= 0 {
 		cfg.missedTolerance = defaultMissedTolerance
-	}
-	if cfg.logger == nil {
-		cfg.logger = slog.Default()
 	}
 
 	c := &Cron{
 		cfg:     cfg,
 		h:       heap.New[*entry](),
 		byEntry: make(map[EntryID]*entry),
+		views:   make(viewMap),
 		wakeCh:  make(chan struct{}, 1),
 	}
 	c.hooks = newHookDispatcher(cfg.hooks, cfg.logger, cfg.recorder, cfg.hookBuffer)
-	empty := viewMap{}
-	c.views.Store(&empty)
 	return c
 }
 
-func (c *Cron) publishViewUpdateLocked(id EntryID, view *Entry) {
-	(*c.views.Load())[id].p.Store(view)
-}
-
-func (c *Cron) publishViewAddLocked(id EntryID, view *Entry) {
+// publishViewAdd creates the entry's stable snapshot cell and inserts it. O(1).
+func (c *Cron) publishViewAdd(e *entry, view *Entry) {
 	cell := &viewCell{}
 	cell.p.Store(view)
-	old := c.views.Load()
-	nm := make(viewMap, len(*old)+1)
-	maps.Copy(nm, *old)
-	nm[id] = cell
-	c.views.Store(&nm)
+	e.view = cell
+	c.viewMu.Lock()
+	c.views[e.id] = cell
+	c.viewMu.Unlock()
 }
 
-func (c *Cron) publishViewRemoveLocked(id EntryID) {
-	old := c.views.Load()
-	nm := make(viewMap, len(*old)-1)
-	for k, vc := range *old {
-		if k != id {
-			nm[k] = vc
-		}
-	}
-	c.views.Store(&nm)
+func (c *Cron) publishViewRemove(id EntryID) {
+	c.viewMu.Lock()
+	delete(c.views, id)
+	c.viewMu.Unlock()
 }
 
 // Add parses spec and registers j. It returns a *ParseError for invalid specs
@@ -145,6 +144,8 @@ func (c *Cron) Add(spec string, j Job, opts ...EntryOption) (EntryID, error) {
 		return c.cfg.parser.Parse(spec)
 	})
 	if err != nil {
+		// Don't pin invalid, often caller-controlled specs in the cache forever.
+		c.parseCache.Forget(spec)
 		return 0, err
 	}
 	return c.add(spec, s, j, opts...)
@@ -156,6 +157,12 @@ func (c *Cron) AddSchedule(s Schedule, j Job, opts ...EntryOption) (EntryID, err
 }
 
 func (c *Cron) add(spec string, s Schedule, j Job, opts ...EntryOption) (EntryID, error) {
+	if s == nil {
+		return 0, ErrNilSchedule
+	}
+	if j == nil {
+		return 0, ErrNilJob
+	}
 	ec := entryConfig{}
 	for _, o := range opts {
 		o(&ec)
@@ -193,7 +200,7 @@ func (c *Cron) add(spec string, s Schedule, j Job, opts ...EntryOption) (EntryID
 	}
 	c.byEntry[id] = e
 	view := entryView(e)
-	c.publishViewAddLocked(id, &view)
+	c.publishViewAdd(e, &view)
 	heapLen := c.h.Len()
 	c.mu.Unlock()
 
@@ -220,7 +227,7 @@ func (c *Cron) Remove(id EntryID) bool {
 		e.item = nil
 	}
 	delete(c.byEntry, id)
-	c.publishViewRemoveLocked(id)
+	c.publishViewRemove(id)
 	heapLen := c.h.Len()
 	c.mu.Unlock()
 	c.wake()
@@ -254,15 +261,16 @@ func (c *Cron) Trigger(id EntryID) error {
 		})
 		return ErrConcurrencyLimit
 	}
-	c.dispatch(c.runCtx, e, fireAt, false)
+	c.dispatch(c.runCtx, e, fireAt, false, true)
 	c.mu.Unlock()
 	return nil
 }
 
 // Entry returns the current snapshot for id.
 func (c *Cron) Entry(id EntryID) (Entry, bool) {
-	m := c.views.Load()
-	cell, ok := (*m)[id]
+	c.viewMu.RLock()
+	cell, ok := c.views[id]
+	c.viewMu.RUnlock()
 	if !ok {
 		return Entry{}, false
 	}
@@ -272,13 +280,14 @@ func (c *Cron) Entry(id EntryID) (Entry, bool) {
 // Entries returns registered entry snapshots ordered by Next.
 func (c *Cron) Entries() iter.Seq[Entry] {
 	return func(yield func(Entry) bool) {
-		m := c.views.Load()
-		if len(*m) == 0 {
-			return
-		}
-		entries := make([]Entry, 0, len(*m))
-		for _, cell := range *m {
+		c.viewMu.RLock()
+		entries := make([]Entry, 0, len(c.views))
+		for _, cell := range c.views {
 			entries = append(entries, *cell.p.Load())
+		}
+		c.viewMu.RUnlock()
+		if len(entries) == 0 {
+			return
 		}
 		slices.SortFunc(entries, func(a, b Entry) int {
 			switch {
@@ -456,10 +465,10 @@ func (c *Cron) commitAndDispatch(ctx context.Context, p firePlan) {
 		cur.item = c.h.Push(cur.next.UnixNano(), cur)
 	}
 	view := entryView(cur)
-	c.publishViewUpdateLocked(p.e.id, &view)
+	cur.view.p.Store(&view)
 
 	if reserved {
-		c.dispatch(ctx, cur, p.fireOne, true)
+		c.dispatch(ctx, cur, p.fireOne, true, false)
 	}
 	nextEmit := cur.next
 	name := cur.name
@@ -473,7 +482,9 @@ func (c *Cron) commitAndDispatch(ctx context.Context, p firePlan) {
 			Policy: c.cfg.missedPolicy,
 		})
 	}
-	if !p.fireOne.IsZero() && !reserved {
+	if !p.missed && !p.fireOne.IsZero() && !reserved {
+		// !p.missed: the block above already emitted for a late fire that also
+		// hit the concurrency limit; don't emit twice for one due fire.
 		lateness := time.Since(p.fireOne)
 		recordJobMissed(c.cfg.recorder, name, lateness)
 		c.hooks.emitMissed(EventMissed{
@@ -525,30 +536,42 @@ func (c *Cron) tryReserveInflight() bool {
 	}
 }
 
-func (c *Cron) dispatch(parent context.Context, e *entry, scheduledAt time.Time, advancePrev bool) {
-	jobCtx := parent
-	var cancel context.CancelFunc
-	if e.timeout > 0 {
-		jobCtx, cancel = context.WithTimeoutCause(jobCtx, e.timeout, ErrJobTimeout)
-	}
-
+func (c *Cron) dispatch(parent context.Context, e *entry, scheduledAt time.Time, advancePrev, manual bool) {
 	c.wg.Go(func() {
 		defer c.inflight.Add(-1)
-		if cancel != nil {
-			defer cancel()
-		}
-		if !c.applyJitter(jobCtx) {
+
+		// Jitter waits on the run ctx, not the job-timeout ctx, so it never eats
+		// the timeout budget; manual Trigger fires immediately.
+		if !manual && !c.applyJitter(parent) {
+			// Reachable only when Stop cancels mid-jitter; record it so the
+			// reserved fire isn't dropped silently.
+			lateness := time.Since(scheduledAt)
+			recordJobMissed(c.cfg.recorder, e.name, lateness)
+			c.hooks.emitMissed(EventMissed{
+				EntryID: e.id, Name: e.name,
+				ScheduledAt: scheduledAt, Lateness: lateness,
+				Policy: c.cfg.missedPolicy,
+			})
 			return
 		}
+
+		// Build the timeout ctx after jitter so it covers only runtime. The
+		// e.timeout > 0 guard matters: WithTimeoutCause(parent, 0) is born expired.
+		jobCtx := parent
+		if e.timeout > 0 {
+			var cancel context.CancelFunc
+			jobCtx, cancel = context.WithTimeoutCause(parent, e.timeout, ErrJobTimeout)
+			defer cancel()
+		}
+
 		fireAt := time.Now()
 		recordJobStarted(c.cfg.recorder, e.name)
 		c.hooks.emitJobStart(EventJobStart{
 			EntryID: e.id, Name: e.name,
 			ScheduledAt: scheduledAt, FireAt: fireAt,
 		})
-		start := fireAt
 		err := e.wrapped.Run(jobCtx)
-		dur := time.Since(start)
+		dur := time.Since(fireAt)
 		recordJobCompleted(c.cfg.recorder, e.name, dur, err)
 		c.hooks.emitJobComplete(EventJobComplete{
 			EntryID: e.id, Name: e.name,
@@ -574,7 +597,7 @@ func (c *Cron) advancePrev(id EntryID, fireAt time.Time) {
 	}
 	cur.prev = fireAt
 	view := entryView(cur)
-	c.publishViewUpdateLocked(id, &view)
+	cur.view.p.Store(&view)
 }
 
 func (c *Cron) heapLen() int {

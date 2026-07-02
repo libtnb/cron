@@ -71,6 +71,10 @@ func (p RetryPolicy) backoff(attempt int) time.Duration {
 			break
 		}
 	}
+	// The loop skips attempt 0, so cap it here too.
+	if p.MaxDelay > 0 && d > p.MaxDelay {
+		d = p.MaxDelay
+	}
 	if p.JitterFrac > 0 {
 		jit := time.Duration(float64(d) * p.JitterFrac)
 		if jit > 0 {
@@ -83,22 +87,34 @@ func (p RetryPolicy) backoff(attempt int) time.Duration {
 	return d
 }
 
-// Wrapper returns a Wrapper that retries on error per p. Attempt errors
-// are joined via errors.Join; ctx cancellation aborts.
+// Wrapper returns a Wrapper that retries on error per p. Attempt errors are
+// joined via errors.Join; ctx cancellation aborts, recording context.Cause so
+// ErrJobTimeout / ErrCronStopping survive into the joined error.
 func (p RetryPolicy) Wrapper() Wrapper {
 	return func(j Job) Job {
 		return JobFunc(func(ctx context.Context) error {
+			// Bound retained errors so unlimited retry (MaxRetries < 0) can't grow
+			// an unbounded slice; keep the first plus the most recent.
+			const maxErrs = 16
 			var errs []error
+			addErr := func(e error) {
+				if len(errs) < maxErrs {
+					errs = append(errs, e)
+					return
+				}
+				copy(errs[1:], errs[2:])
+				errs[len(errs)-1] = e
+			}
 			for i := 0; ; i++ {
-				if err := ctx.Err(); err != nil {
-					errs = append(errs, err)
+				if ctx.Err() != nil {
+					addErr(context.Cause(ctx))
 					return errors.Join(errs...)
 				}
 				err := j.Run(ctx)
 				if err == nil {
 					return nil
 				}
-				errs = append(errs, err)
+				addErr(err)
 				if p.MaxRetries >= 0 && i >= p.MaxRetries {
 					break
 				}
@@ -111,7 +127,7 @@ func (p RetryPolicy) Wrapper() Wrapper {
 				case <-timer.C:
 				case <-ctx.Done():
 					timer.Stop()
-					errs = append(errs, ctx.Err())
+					addErr(context.Cause(ctx))
 					return errors.Join(errs...)
 				}
 			}

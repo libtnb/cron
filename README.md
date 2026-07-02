@@ -22,7 +22,7 @@ A modern, focused Go cron scheduler with no third-party dependencies.
   `DelayIfRunning`.
 - Per-event hooks and recorders so you can plug in metrics and tracing.
 - Missed-fire policies (`MissedSkip`, `MissedRunOnce`) with a configurable
-  tolerance window, so a restarted process can catch up exactly once.
+  tolerance window for in-process stalls (VM suspend, clock jumps, backlog).
 - Manual `Trigger` and `TriggerByName`, with concurrency and entry limits.
 - DST-aware. Per-entry timeout, jitter, retry, name, and chain.
 
@@ -109,9 +109,15 @@ timezone for that entry.
 
 The descriptors `@yearly`, `@monthly`, `@weekly`, `@daily`, `@midnight`,
 `@hourly`, and `@every <duration>` are also accepted. `@every 90s` is the
-canonical fixed-interval form.
+canonical fixed-interval form; the interval has a 1s floor.
 
-To use seconds, configure the parser:
+To use seconds, enable it on the built-in parser (keeps `WithLocation` working):
+
+```go
+cron.WithSecondsField()
+```
+
+Or install a custom parser, which then owns the timezone:
 
 ```go
 // Optional seconds: 5- and 6-field specs both parse.
@@ -126,6 +132,7 @@ cron.WithParser(cron.NewStandardParser(cron.WithSeconds(true)))
 ```go
 c := cron.New(
 	cron.WithLocation(time.UTC),
+	cron.WithSecondsField(), // the spec below has a seconds field
 	cron.WithMissedFire(cron.MissedRunOnce),
 	cron.WithMaxConcurrent(32),
 	cron.WithRetry(cron.Retry(3, cron.RetryInitial(time.Second))),
@@ -153,8 +160,9 @@ When a firing runs more than `WithMissedTolerance` (default `1s`) late,
 - `MissedSkip` (default) drops the missed firing and waits for the next
   scheduled time.
 - `MissedRunOnce` runs the job once at the most recent missed time, then
-  resumes the regular schedule. Useful when the process was restarted and
-  you want the job to catch up exactly once.
+  resumes the regular schedule. This covers in-process stalls (VM suspend,
+  clock jumps, a backlog while the loop was blocked) — not restarts: a fresh
+  process has no record of firings missed while it was down.
 
 ## Triggering and removal
 
@@ -228,6 +236,11 @@ Hooks are delivered on a buffered channel and dropped when the buffer is
 full. The size is configurable via `WithHookBuffer` and the drop count is
 exposed through `HookDroppedRecorder`.
 
+Recorders, unlike hooks, are not serialized: their methods are called inline
+and concurrently from job goroutines, the scheduler loop, and
+Add/Remove/Trigger callers. Implementations must be concurrency-safe and
+non-blocking.
+
 ## Workflow DAGs
 
 `workflow.Workflow` is a `cron.Job`, so a DAG can be scheduled with `Add`
@@ -272,7 +285,7 @@ convention.
 
 | robfig/cron                        | libtnb/cron                                                             |
 |------------------------------------|-------------------------------------------------------------------------|
-| `cron.New(cron.WithSeconds())`     | `cron.New(cron.WithParser(cron.NewStandardParser(cron.WithSeconds())))` |
+| `cron.New(cron.WithSeconds())`     | `cron.New(cron.WithSecondsField())`                                     |
 | `Job.Run()`                        | `Job.Run(context.Context) error`                                        |
 | `c.AddFunc(spec, func())`          | `c.Add(spec, cron.JobFunc(func(ctx) error { ... }))`                    |
 | `cron.WithLogger(custom)`          | `cron.WithLogger(*slog.Logger)`                                         |

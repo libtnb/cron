@@ -6,14 +6,16 @@ import (
 )
 
 var (
-	ErrCapacityReached     = errors.New("cron: capacity reached")    // Add: WithMaxEntries exceeded
-	ErrAlreadyRunning      = errors.New("cron: job already running") // wrap.SkipIfRunning
-	ErrJobTimeout          = errors.New("cron: job timeout")         // ctx cause from WithTimeout
-	ErrCronStopping        = errors.New("cron: scheduler stopping")  // ctx cause from Stop
-	ErrEntryNotFound       = errors.New("cron: entry not found")     // Trigger
+	ErrCapacityReached     = errors.New("cron: capacity reached")
+	ErrAlreadyRunning      = errors.New("cron: job already running")
+	ErrJobTimeout          = errors.New("cron: job timeout")
+	ErrCronStopping        = errors.New("cron: scheduler stopping")
+	ErrEntryNotFound       = errors.New("cron: entry not found")
 	ErrSchedulerNotRunning = errors.New("cron: scheduler not running")
 	ErrConcurrencyLimit    = errors.New("cron: max concurrent reached")
-	ErrSchedulerStopped    = errors.New("cron: scheduler stopped") // Start: Stop already ran
+	ErrSchedulerStopped    = errors.New("cron: scheduler stopped")
+	ErrNilJob              = errors.New("cron: nil job")
+	ErrNilSchedule         = errors.New("cron: nil schedule")
 )
 
 // ParseError describes a failure parsing a cron specification.
