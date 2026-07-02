@@ -48,3 +48,10 @@ func TestWrapper_BackoffZeroSkipsTimer(t *testing.T) {
 	}
 	_ = p.Wrapper()(alwaysFailJob{}).Run(context.Background())
 }
+
+func TestBackoff_CapsFirstAttempt(t *testing.T) {
+	p := RetryPolicy{MaxRetries: 3, Initial: 600 * time.Millisecond, MaxDelay: 50 * time.Millisecond}
+	if got := p.backoff(0); got != 50*time.Millisecond {
+		t.Fatalf("backoff(0) = %v, want 50ms (MaxDelay must cap attempt 0)", got)
+	}
+}

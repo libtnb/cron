@@ -729,3 +729,20 @@ func TestCron_PrevNotAdvancedWhenJitterCancelsBeforeRun(t *testing.T) {
 		}
 	})
 }
+
+func TestAdd_InvalidSpecReturnsError(t *testing.T) {
+	c := cron.New()
+	if _, err := c.Add("definitely not a spec", cron.JobFunc(noop)); err == nil {
+		t.Fatal("expected a parse error for an invalid spec")
+	}
+}
+
+func TestAdd_NilJobAndSchedule(t *testing.T) {
+	c := cron.New()
+	if _, err := c.Add("@every 1s", nil); !errors.Is(err, cron.ErrNilJob) {
+		t.Fatalf("Add(nil job) = %v, want ErrNilJob", err)
+	}
+	if _, err := c.AddSchedule(nil, cron.JobFunc(noop)); !errors.Is(err, cron.ErrNilSchedule) {
+		t.Fatalf("AddSchedule(nil schedule) = %v, want ErrNilSchedule", err)
+	}
+}

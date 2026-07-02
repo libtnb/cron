@@ -134,12 +134,6 @@ func (c *Cron) publishViewRemove(id EntryID) {
 // Add parses spec and registers j. It returns a *ParseError for invalid specs
 // or ErrCapacityReached when WithMaxEntries rejects the registration.
 func (c *Cron) Add(spec string, j Job, opts ...EntryOption) (EntryID, error) {
-	if s, err, ok := c.parseCache.Lookup(spec); ok {
-		if err != nil {
-			return 0, err
-		}
-		return c.add(spec, s, j, opts...)
-	}
 	s, err := c.parseCache.Get(spec, func() (Schedule, error) {
 		return c.cfg.parser.Parse(spec)
 	})

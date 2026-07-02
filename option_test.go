@@ -121,3 +121,20 @@ func (emptyHook) OnSchedule(cron.EventSchedule)       {}
 func (emptyHook) OnJobStart(cron.EventJobStart)       {}
 func (emptyHook) OnJobComplete(cron.EventJobComplete) {}
 func (emptyHook) OnMissedFire(cron.EventMissed)       {}
+
+func TestWithSecondsField(t *testing.T) {
+	c := cron.New(cron.WithSecondsField())
+	if _, err := c.Add("0 30 9 * * *", cron.JobFunc(noop)); err != nil {
+		t.Fatalf("6-field spec with WithSecondsField should parse: %v", err)
+	}
+}
+
+func TestWithParserIgnoresLocation(t *testing.T) {
+	c := cron.New(
+		cron.WithParser(cron.NewStandardParser(cron.WithDefaultLocation(time.UTC))),
+		cron.WithLocation(time.UTC),
+	)
+	if _, err := c.Add("* * * * *", cron.JobFunc(noop)); err != nil {
+		t.Fatal(err)
+	}
+}
