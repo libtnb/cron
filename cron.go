@@ -284,16 +284,7 @@ func (c *Cron) Entries() iter.Seq[Entry] {
 			return
 		}
 		slices.SortFunc(entries, func(a, b Entry) int {
-			switch {
-			case a.Next.IsZero() && b.Next.IsZero():
-				return 0
-			case a.Next.IsZero():
-				return 1
-			case b.Next.IsZero():
-				return -1
-			default:
-				return a.Next.Compare(b.Next)
-			}
+			return compareNext(a.Next, b.Next)
 		})
 		for _, e := range entries {
 			if !yield(e) {
@@ -634,5 +625,20 @@ func entryView(e *entry) Entry {
 		Schedule: e.schedule,
 		Prev:     e.prev,
 		Next:     e.next,
+	}
+}
+
+// compareNext orders entries by Next, with zero times (exhausted or triggered)
+// sorted last.
+func compareNext(a, b time.Time) int {
+	switch {
+	case a.IsZero() && b.IsZero():
+		return 0
+	case a.IsZero():
+		return 1
+	case b.IsZero():
+		return -1
+	default:
+		return a.Compare(b)
 	}
 }

@@ -218,3 +218,27 @@ func TestCron_AddScheduleComputesNextOutsideMu(t *testing.T) {
 	close(s.release)
 	<-addDone
 }
+
+func TestCompareNext(t *testing.T) {
+	z := time.Time{}
+	early := time.Unix(100, 0)
+	late := time.Unix(200, 0)
+	cases := []struct {
+		name string
+		a, b time.Time
+		want int // sign
+	}{
+		{"both zero", z, z, 0},
+		{"a zero sorts after", z, early, 1},
+		{"b zero sorts before", early, z, -1},
+		{"earlier first", early, late, -1},
+		{"later after", late, early, 1},
+		{"equal non-zero", early, early, 0},
+	}
+	for _, c := range cases {
+		got := compareNext(c.a, c.b)
+		if (got < 0) != (c.want < 0) || (got > 0) != (c.want > 0) {
+			t.Errorf("%s: compareNext = %d, want sign of %d", c.name, got, c.want)
+		}
+	}
+}
