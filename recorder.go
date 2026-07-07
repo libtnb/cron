@@ -19,6 +19,9 @@ type JobMissedRecorder interface {
 }
 type QueueDepthRecorder interface{ QueueDepth(n int) }
 type HookDroppedRecorder interface{ HookDropped() }
+type JobSkippedRecorder interface {
+	JobSkipped(name string, reason SkipReason)
+}
 
 func recordJobScheduled(r any, name string) {
 	if x, ok := r.(JobScheduledRecorder); ok {
@@ -47,5 +50,11 @@ func recordJobMissed(r any, name string, lateness time.Duration) {
 func recordQueueDepth(r any, n int) {
 	if x, ok := r.(QueueDepthRecorder); ok {
 		x.QueueDepth(n)
+	}
+}
+
+func recordJobSkipped(r any, name string, reason SkipReason) {
+	if x, ok := r.(JobSkippedRecorder); ok {
+		x.JobSkipped(name, reason)
 	}
 }

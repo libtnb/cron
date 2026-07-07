@@ -28,6 +28,9 @@ A modern, focused Go cron scheduler with no third-party dependencies.
   cross-restart catch-up.
 - Lifecycle control: `Pause`/`Resume`, in-place `Update`, graceful `Drain` or
   cancelling `Stop`.
+- Distributed coordination: `Locker` (exactly-once per fire, clock-skew-proof
+  fire-scoped keys) and `Elector` (leader-only scheduling), with Redis and
+  Postgres backends as separate zero-impact modules.
 - Manual `Trigger`, `TriggerAndWait`, and `TriggerByName`, with concurrency
   and entry limits.
 - DST-correct scheduling (differentially fuzzed against a wall-clock scan).
@@ -100,6 +103,8 @@ func main() {
 | `github.com/libtnb/cron/wrap`      | Job wrappers: `Recover`, `Timeout`, `SkipIfRunning`, `DelayIfRunning`, `Retry`. |
 | `github.com/libtnb/cron/workflow`  | DAG jobs with `OnSuccess`, `OnFailure`, `OnSkipped`, `OnComplete`.              |
 | `github.com/libtnb/cron/parserext` | Quartz tokens (`L`, `N#M`, `NL`).                                               |
+| `github.com/libtnb/cron/lockers/redis` | Redis `Locker`/`Elector` (separate module).                                 |
+| `github.com/libtnb/cron/lockers/postgres` | Postgres `Locker`/`Elector` (separate module).                           |
 
 ## Cron expressions
 
@@ -199,6 +204,50 @@ c.Add("0 2 * * *", job,
 	cron.WithLastRun(lastRunFromDB),             // first fire computes from here
 	cron.WithEntryMissedFire(cron.MissedRunOnce)) // -> the 02:00 you missed runs once
 ```
+
+## Distributed coordination (multi-instance)
+
+Running the same scheduler on N instances runs every job N times. Two
+first-class primitives fix that; the core stays dependency-free and backends
+live in separate modules:
+
+```sh
+go get github.com/libtnb/cron/lockers/redis      # package redislock
+go get github.com/libtnb/cron/lockers/postgres   # package pglock
+```
+
+**Locker — exactly once per fire.** Every automatic fire claims the key
+`<name>@<scheduledAt-unix>`; one instance in the fleet wins, the rest skip and
+emit `EventSkipped`. Because the key identifies the fire (not the job), dedup
+depends on neither lock hold time nor clock agreement, and catch-up fires
+(`MissedRunOnce`/`MissedRunAll`) each claim their own key. Claims expire via
+TTL (default 10m) — set it to exceed your jitter plus clock skew.
+
+```go
+client := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+c := cron.New(cron.WithLocker(redislock.NewLocker(client)))
+// Names are the cross-instance key component: keep them unique per job.
+c.Add("0 * * * *", job, cron.WithName("hourly-report"))
+```
+
+**Elector — one active instance.** `IsLeader` gates every fire; on any error
+(including backend outage) the fire is skipped — fail-closed, nobody runs.
+
+```go
+c := cron.New(cron.WithElector(redislock.NewElector(client)))
+```
+
+Postgres works through `database/sql` with any driver; create the tables once
+with `pglock.Migrate(ctx, db)`.
+
+- Override per entry with `WithEntryLocker(l)`; `WithEntryLocker(nil)` opts an
+  entry out of the global locker.
+- Manual `Trigger`/`TriggerAndWait` bypass coordination: manual means "run it
+  here, now".
+- Observe skips with `SkipHook` (`EventSkipped`: `not-leader`, `lock-held`, or
+  `lock-error`) and `JobSkippedRecorder`.
+- `cron.MemoryLocker`/`cron.MemoryElector` (in the core, dependency-free)
+  serve tests and single-process composition.
 
 ## Triggering and removal
 

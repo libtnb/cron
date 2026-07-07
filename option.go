@@ -32,6 +32,8 @@ type config struct {
 	retry           RetryPolicy
 	recorder        any
 	recoverDisabled bool
+	locker          Locker
+	elector         Elector
 }
 
 type entryConfig struct {
@@ -45,6 +47,8 @@ type entryConfig struct {
 	jitter    time.Duration
 	jitterSet bool
 	lastRun   time.Time
+	locker    Locker
+	lockerSet bool
 }
 
 // WithLocation sets the default schedule timezone. Default is time.Local.
@@ -185,4 +189,26 @@ func WithEntryJitter(max time.Duration) EntryOption {
 // down. It also seeds Entry.Prev.
 func WithLastRun(t time.Time) EntryOption {
 	return func(e *entryConfig) { e.lastRun = t }
+}
+
+// WithLocker sets the distributed Locker every automatic fire must claim
+// (see FireKey). On failure the fire is skipped on this instance and
+// EventSkipped is emitted. Manual Trigger bypasses it.
+func WithLocker(l Locker) Option {
+	return func(c *config) { c.locker = l }
+}
+
+// WithElector gates automatic fires on leadership: any IsLeader error skips
+// the fire on this instance. Manual Trigger bypasses it.
+func WithElector(e Elector) Option {
+	return func(c *config) { c.elector = e }
+}
+
+// WithEntryLocker overrides the scheduler's Locker for one entry. An explicit
+// nil disables distributed locking for the entry.
+func WithEntryLocker(l Locker) EntryOption {
+	return func(e *entryConfig) {
+		e.locker = l
+		e.lockerSet = true
+	}
 }

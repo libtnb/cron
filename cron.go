@@ -2,6 +2,7 @@ package cron
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
@@ -28,6 +29,7 @@ type entry struct {
 	timeout  time.Duration
 	jitter   time.Duration
 	missed   MissedFirePolicy
+	locker   Locker
 
 	next   time.Time
 	prev   time.Time
@@ -440,6 +442,10 @@ func (c *Cron) add(spec string, s Schedule, j Job, opts ...EntryOption) (EntryID
 	if ec.jitterSet {
 		jitter = ec.jitter
 	}
+	locker := c.cfg.locker
+	if ec.lockerSet {
+		locker = ec.locker
+	}
 	anchor := ec.lastRun
 	if anchor.IsZero() {
 		anchor = time.Now()
@@ -447,6 +453,12 @@ func (c *Cron) add(spec string, s Schedule, j Job, opts ...EntryOption) (EntryID
 	next := s.Next(anchor)
 
 	id := EntryID(c.nextID.Add(1))
+	if locker != nil && ec.name == "" {
+		// FireKey falls back to the process-local EntryID, which only matches
+		// across identical binaries registering entries in identical order.
+		c.cfg.logger.Warn("cron: distributed locker on unnamed entry; use WithName for cross-instance fire keys",
+			slog.Uint64("id", uint64(id)))
+	}
 	e := &entry{
 		id:       id,
 		name:     ec.name,
@@ -456,6 +468,7 @@ func (c *Cron) add(spec string, s Schedule, j Job, opts ...EntryOption) (EntryID
 		timeout:  ec.timeout,
 		jitter:   jitter,
 		missed:   missed,
+		locker:   locker,
 		next:     next,
 		prev:     ec.lastRun,
 	}
@@ -758,6 +771,40 @@ func (c *Cron) dispatch(parent context.Context, e *entry, scheduledAt time.Time,
 			return
 		}
 
+		// Distributed coordination runs after jitter (which spreads the fleet's
+		// Lock calls) and before the timeout ctx. Manual triggers bypass it:
+		// Trigger means "run it HERE now", and manual fires are the only ones
+		// carrying opts.result, so these skip paths never owe a result.
+		if !opts.manual {
+			if el := c.cfg.elector; el != nil {
+				if err := el.IsLeader(parent); err != nil {
+					c.skipFire(e, scheduledAt, SkipNotLeader, err)
+					return
+				}
+			}
+			if e.locker != nil {
+				release, err := e.locker.Lock(parent, FireKey(e.name, e.id, scheduledAt))
+				if err != nil {
+					reason := SkipLockError
+					if errors.Is(err, ErrLockHeld) {
+						reason = SkipLockHeld
+					}
+					c.skipFire(e, scheduledAt, reason, err)
+					return
+				}
+				// Release after the job with a ctx detached from cancellation,
+				// so Stop or a job timeout cannot prevent it; TTL is the net.
+				defer func() {
+					rctx, cancel := context.WithTimeout(context.WithoutCancel(parent), releaseTimeout)
+					defer cancel()
+					if rerr := release(rctx); rerr != nil {
+						c.cfg.logger.Error("cron: lock release failed",
+							slog.String("name", e.name), slog.Any("error", rerr))
+					}
+				}()
+			}
+		}
+
 		// Build the timeout ctx after jitter so it covers only runtime. The
 		// e.timeout > 0 guard matters: WithTimeoutCause(parent, 0) is born expired.
 		jobCtx := parent
@@ -788,6 +835,15 @@ func (c *Cron) dispatch(parent context.Context, e *entry, scheduledAt time.Time,
 		if opts.result != nil {
 			opts.result <- err
 		}
+	})
+}
+
+// skipFire records a fire suppressed by distributed coordination.
+func (c *Cron) skipFire(e *entry, scheduledAt time.Time, reason SkipReason, err error) {
+	recordJobSkipped(c.cfg.recorder, e.name, reason)
+	c.hooks.emitSkipped(EventSkipped{
+		EntryID: e.id, Name: e.name,
+		ScheduledAt: scheduledAt, Reason: reason, Err: err,
 	})
 }
 

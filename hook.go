@@ -13,6 +13,7 @@ type ScheduleHook interface{ OnSchedule(EventSchedule) }
 type JobStartHook interface{ OnJobStart(EventJobStart) }
 type JobCompleteHook interface{ OnJobComplete(EventJobComplete) }
 type MissedHook interface{ OnMissedFire(EventMissed) }
+type SkipHook interface{ OnSkipped(EventSkipped) }
 
 // EventSchedule is emitted when an entry is added or its next firing is
 // recomputed after a fire.
@@ -49,6 +50,15 @@ type EventMissed struct {
 	ScheduledAt time.Time
 	Lateness    time.Duration
 	Policy      MissedFirePolicy
+}
+
+// EventSkipped is emitted when distributed coordination suppresses a fire.
+type EventSkipped struct {
+	EntryID     EntryID
+	Name        string
+	ScheduledAt time.Time
+	Reason      SkipReason
+	Err         error // wraps ErrLockHeld / ErrNotLeader, or the backend error
 }
 
 // hookDispatcher serialises hook delivery and recovers hook panics.
@@ -165,6 +175,19 @@ func (d *hookDispatcher) emitMissed(e EventMissed) {
 		for _, h := range hs {
 			if x, ok := h.(MissedHook); ok {
 				d.invokeOne("missed_fire", h, func() { x.OnMissedFire(e) })
+			}
+		}
+	})
+}
+
+func (d *hookDispatcher) emitSkipped(e EventSkipped) {
+	if d == nil || d.ch == nil {
+		return
+	}
+	d.emit(func(hs []any) {
+		for _, h := range hs {
+			if x, ok := h.(SkipHook); ok {
+				d.invokeOne("skipped", h, func() { x.OnSkipped(e) })
 			}
 		}
 	})
