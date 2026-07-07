@@ -16,6 +16,7 @@ var (
 	ErrSchedulerStopped    = errors.New("cron: scheduler stopped")
 	ErrNilJob              = errors.New("cron: nil job")
 	ErrNilSchedule         = errors.New("cron: nil schedule")
+	ErrJobPanic            = errors.New("cron: job panicked")
 )
 
 // ParseError describes a failure parsing a cron specification.

@@ -31,11 +31,12 @@ func TestEntry_ValidAndLogValue(t *testing.T) {
 		t.Fatal("LogValue kind")
 	}
 	full := cron.Entry{
-		ID:   2,
-		Name: "n",
-		Spec: "@every 1m",
-		Prev: time.Now().Add(-time.Hour),
-		Next: time.Now().Add(time.Hour),
+		ID:     2,
+		Name:   "n",
+		Spec:   "@every 1m",
+		Prev:   time.Now().Add(-time.Hour),
+		Next:   time.Now().Add(time.Hour),
+		Paused: true,
 	}
 	if full.LogValue().Kind() != slog.KindGroup {
 		t.Fatal("full LogValue kind")

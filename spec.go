@@ -3,8 +3,9 @@ package cron
 import (
 	"iter"
 	"log/slog"
-	"math/bits"
 	"time"
+
+	"github.com/libtnb/cron/internal/bitmask"
 )
 
 // nextYearLimit caps SpecSchedule.Next search; matches robfig/cron.
@@ -36,6 +37,9 @@ func (s *SpecSchedule) Location() *time.Location {
 func (s *SpecSchedule) Next(t time.Time) time.Time {
 	origLoc := t.Location()
 	loc := s.loc
+	if loc == nil { // zero-value SpecSchedule
+		loc = time.Local
+	}
 	if loc != origLoc {
 		t = t.In(loc)
 	}
@@ -50,9 +54,12 @@ func (s *SpecSchedule) Next(t time.Time) time.Time {
 		}
 
 		if 1<<uint(month)&s.month == 0 {
-			m := nextBitInRange(s.month, uint(month)+1, 12)
+			m := bitmask.NextInRange(s.month, uint(month)+1, 12)
 			if m < 0 {
-				m = nextBitInRange(s.month, 1, 12)
+				m = bitmask.NextInRange(s.month, 1, 12)
+				if m < 0 {
+					return time.Time{} // zero-value SpecSchedule: empty month set
+				}
 				t = time.Date(year+1, time.Month(m), 1, 0, 0, 0, 0, loc)
 			} else {
 				t = time.Date(year, time.Month(m), 1, 0, 0, 0, 0, loc)
@@ -68,7 +75,7 @@ func (s *SpecSchedule) Next(t time.Time) time.Time {
 		hour, minute, sec := t.Clock()
 
 		if 1<<uint(hour)&s.hour == 0 {
-			h := nextBitInRange(s.hour, uint(hour)+1, 23)
+			h := bitmask.NextInRange(s.hour, uint(hour)+1, 23)
 			if h < 0 {
 				t = time.Date(year, month, day+1, 0, 0, 0, 0, loc)
 				continue
@@ -88,7 +95,7 @@ func (s *SpecSchedule) Next(t time.Time) time.Time {
 		}
 
 		if 1<<uint(minute)&s.minute == 0 {
-			m := nextBitInRange(s.minute, uint(minute)+1, 59)
+			m := bitmask.NextInRange(s.minute, uint(minute)+1, 59)
 			if m < 0 {
 				t = t.Add(time.Hour -
 					time.Duration(minute)*time.Minute -
@@ -101,7 +108,7 @@ func (s *SpecSchedule) Next(t time.Time) time.Time {
 		}
 
 		if 1<<uint(sec)&s.second == 0 {
-			secN := nextBitInRange(s.second, uint(sec)+1, 59)
+			secN := bitmask.NextInRange(s.second, uint(sec)+1, 59)
 			if secN < 0 {
 				t = t.Add(time.Minute - time.Duration(sec)*time.Second)
 				continue
@@ -140,21 +147,6 @@ func (s *SpecSchedule) LogValue() slog.Value {
 		slog.String("kind", "spec"),
 		slog.String("loc", loc),
 	)
-}
-
-// nextBitInRange returns the lowest set bit in [from, until], or -1.
-func nextBitInRange(bm uint64, from, until uint) int {
-	if from > until {
-		return -1
-	}
-	masked := bm >> from << from
-	if until < 63 {
-		masked &= (uint64(1) << (until + 1)) - 1
-	}
-	if masked == 0 {
-		return -1
-	}
-	return bits.TrailingZeros64(masked)
 }
 
 // dayMatches implements the DOM/DOW coupling: AND when either field was "*",

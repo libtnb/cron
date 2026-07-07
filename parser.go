@@ -143,6 +143,7 @@ func (p *StandardParser) Parse(spec string) (Schedule, error) {
 	if err != nil {
 		return nil, err
 	}
+	dow = normalizeDow(dow)
 
 	return &SpecSchedule{
 		second: sec,
@@ -286,7 +287,8 @@ var (
 		"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
 		"jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
 	}}
-	boundsDow = boundary{0, 6, map[string]uint{
+	// dow accepts 0-7 per POSIX; 7 is folded into Sunday after parsing.
+	boundsDow = boundary{0, 7, map[string]uint{
 		"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6,
 	}}
 )
@@ -376,6 +378,14 @@ func getRange(spec, name, expr string, b boundary) (uint64, error) {
 		bits |= 1 << v
 	}
 	return bits | extra, nil
+}
+
+// normalizeDow folds bit 7 (the POSIX alias for Sunday) into bit 0.
+func normalizeDow(bm uint64) uint64 {
+	if bm&(1<<7) != 0 {
+		bm = bm&^(1<<7) | 1
+	}
+	return bm
 }
 
 func parseIntOrName(s string, b boundary) (uint, error) {

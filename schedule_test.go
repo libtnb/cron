@@ -54,3 +54,68 @@ func TestTriggeredSchedule_String(t *testing.T) {
 		t.Fatalf("String = %q, want @triggered", got)
 	}
 }
+
+func TestOnceAt(t *testing.T) {
+	at := t0(2026, 6, 1, 12, 0, 0)
+	s := OnceAt(at)
+	if got := s.Next(at.Add(-time.Hour)); !got.Equal(at) {
+		t.Fatalf("before: got %v, want %v", got, at)
+	}
+	if got := s.Next(at); !got.IsZero() {
+		t.Fatalf("at the instant: got %v, want zero (strictly after)", got)
+	}
+	if got := s.Next(at.Add(time.Hour)); !got.IsZero() {
+		t.Fatalf("after: got %v, want zero", got)
+	}
+	str, ok := s.(interface{ String() string })
+	if !ok || str.String() != "@at 2026-06-01T12:00:00Z" {
+		t.Fatalf("String = %v", str)
+	}
+}
+
+func TestUnion(t *testing.T) {
+	t1 := t0(2026, 1, 1, 6, 0, 0)
+	t2 := t0(2026, 1, 1, 9, 0, 0)
+	u := Union(OnceAt(t2), nil, OnceAt(t1))
+
+	from := t0(2026, 1, 1, 0, 0, 0)
+	if got := u.Next(from); !got.Equal(t1) {
+		t.Fatalf("first: got %v, want %v", got, t1)
+	}
+	if got := u.Next(t1); !got.Equal(t2) {
+		t.Fatalf("second: got %v, want %v", got, t2)
+	}
+	if got := u.Next(t2); !got.IsZero() {
+		t.Fatalf("exhausted: got %v", got)
+	}
+	if got := Union().Next(from); !got.IsZero() {
+		t.Fatalf("empty union: got %v", got)
+	}
+}
+
+func TestFilter(t *testing.T) {
+	base := ConstantDelay(time.Minute)
+	from := t0(2026, 1, 1, 0, 0, 30)
+
+	odd := Filter(base, func(t time.Time) bool { return t.Minute()%2 == 1 })
+	if got := odd.Next(from); got.Minute() != 1 {
+		t.Fatalf("odd filter: got %v", got)
+	}
+	pass := Filter(base, nil)
+	if got := pass.Next(from); !got.Equal(base.Next(from)) {
+		t.Fatalf("nil keep: got %v", got)
+	}
+	if got := Filter(nil, nil).Next(from); !got.IsZero() {
+		t.Fatalf("nil schedule: got %v", got)
+	}
+	// A finite schedule that never satisfies keep returns zero via exhaustion.
+	never := Filter(OnceAt(from.Add(time.Hour)), func(time.Time) bool { return false })
+	if got := never.Next(from); !got.IsZero() {
+		t.Fatalf("exhausted: got %v", got)
+	}
+	// An infinite schedule that never satisfies keep gives up at the scan cap.
+	capped := Filter(base, func(time.Time) bool { return false })
+	if got := capped.Next(from); !got.IsZero() {
+		t.Fatalf("cap: got %v", got)
+	}
+}

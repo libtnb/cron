@@ -2,9 +2,11 @@ package cron
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"log/slog"
 	mathrand "math/rand/v2"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -14,6 +16,9 @@ import (
 	"github.com/libtnb/cron/internal/parsecache"
 )
 
+// defaultParseCacheLimit caps how many distinct specs Add memoizes.
+const defaultParseCacheLimit = 1024
+
 type entry struct {
 	id       EntryID
 	name     string
@@ -21,9 +26,13 @@ type entry struct {
 	schedule Schedule
 	wrapped  Job // global+entry chain applied
 	timeout  time.Duration
+	jitter   time.Duration
+	missed   MissedFirePolicy
 
-	next time.Time
-	prev time.Time
+	next   time.Time
+	prev   time.Time
+	paused bool
+	gen    uint64 // bumped by Pause/Resume/Update; stales in-flight fire plans
 
 	item *heap.Item[*entry] // nil iff not in the heap
 	view *viewCell          // snapshot cell, stable for the entry's lifetime
@@ -37,18 +46,32 @@ type viewCell struct {
 
 type viewMap map[EntryID]*viewCell
 
+// dueFire captures everything commit needs while still under c.mu; schedule
+// and gen are snapshotted because Update can swap them concurrently.
 type dueFire struct {
 	e         *entry
+	schedule  Schedule
 	scheduled time.Time
+	gen       uint64
 }
 
 type firePlan struct {
 	e         *entry
+	schedule  Schedule
+	gen       uint64
 	scheduled time.Time
-	fireOne   time.Time // zero if no fire (MissedSkip)
+	fireOne   time.Time   // zero if no fire (MissedSkip or exhausted catch-up)
+	fireAll   []time.Time // MissedRunAll catch-up instants
 	nextFire  time.Time
 	lateness  time.Duration
 	missed    bool
+}
+
+// fireOpts controls one dispatched invocation.
+type fireOpts struct {
+	advancePrev bool
+	manual      bool         // Trigger: skip jitter
+	result      chan<- error // if non-nil (cap >= 1), receives the outcome
 }
 
 // Cron is a job scheduler. Construct one with New, register jobs, then Start.
@@ -56,7 +79,7 @@ type Cron struct {
 	cfg        config
 	parseCache parsecache.Cache[Schedule]
 
-	mu      sync.Mutex         // guards h, byEntry
+	mu      sync.Mutex         // guards h, byEntry, entry mutation
 	h       *heap.Heap[*entry] // scheduling heap
 	byEntry map[EntryID]*entry // canonical entry table
 	nextID  atomic.Uint64
@@ -69,11 +92,12 @@ type Cron struct {
 	running atomic.Bool
 	wakeCh  chan struct{}
 
-	startMu   sync.Mutex
-	runCtx    context.Context
-	runCancel context.CancelCauseFunc
-	runDone   chan struct{}
-	started   bool
+	startMu    sync.Mutex
+	runCtx     context.Context
+	runCancel  context.CancelCauseFunc
+	loopCancel context.CancelFunc // stops the loop without cancelling jobs
+	runDone    chan struct{}
+	started    bool
 
 	wg       sync.WaitGroup
 	inflight atomic.Int64
@@ -111,35 +135,16 @@ func New(opts ...Option) *Cron {
 		views:   make(viewMap),
 		wakeCh:  make(chan struct{}, 1),
 	}
+	c.parseCache.Limit = defaultParseCacheLimit
 	c.hooks = newHookDispatcher(cfg.hooks, cfg.logger, cfg.recorder, cfg.hookBuffer)
 	return c
-}
-
-// publishViewAdd creates the entry's stable snapshot cell and inserts it. O(1).
-func (c *Cron) publishViewAdd(e *entry, view *Entry) {
-	cell := &viewCell{}
-	cell.p.Store(view)
-	e.view = cell
-	c.viewMu.Lock()
-	c.views[e.id] = cell
-	c.viewMu.Unlock()
-}
-
-func (c *Cron) publishViewRemove(id EntryID) {
-	c.viewMu.Lock()
-	delete(c.views, id)
-	c.viewMu.Unlock()
 }
 
 // Add parses spec and registers j. It returns a *ParseError for invalid specs
 // or ErrCapacityReached when WithMaxEntries rejects the registration.
 func (c *Cron) Add(spec string, j Job, opts ...EntryOption) (EntryID, error) {
-	s, err := c.parseCache.Get(spec, func() (Schedule, error) {
-		return c.cfg.parser.Parse(spec)
-	})
+	s, err := c.parse(spec)
 	if err != nil {
-		// Don't pin invalid, often caller-controlled specs in the cache forever.
-		c.parseCache.Forget(spec)
 		return 0, err
 	}
 	return c.add(spec, s, j, opts...)
@@ -150,61 +155,22 @@ func (c *Cron) AddSchedule(s Schedule, j Job, opts ...EntryOption) (EntryID, err
 	return c.add("", s, j, opts...)
 }
 
-func (c *Cron) add(spec string, s Schedule, j Job, opts ...EntryOption) (EntryID, error) {
+// Update re-parses spec and swaps id's schedule in place, keeping the job,
+// entry options, ID, and Prev. The next fire is recomputed from now.
+func (c *Cron) Update(id EntryID, spec string) error {
+	s, err := c.parse(spec)
+	if err != nil {
+		return err
+	}
+	return c.updateSchedule(id, spec, s)
+}
+
+// UpdateSchedule is Update for a programmatic Schedule.
+func (c *Cron) UpdateSchedule(id EntryID, s Schedule) error {
 	if s == nil {
-		return 0, ErrNilSchedule
+		return ErrNilSchedule
 	}
-	if j == nil {
-		return 0, ErrNilJob
-	}
-	ec := entryConfig{}
-	for _, o := range opts {
-		o(&ec)
-	}
-
-	wrappers := append(append([]Wrapper(nil), c.cfg.chain...), ec.chain...)
-	rp := c.cfg.retry
-	if ec.retrySet {
-		rp = ec.retry
-	}
-	if !rp.IsZero() {
-		wrappers = append(wrappers, rp.Wrapper())
-	}
-	wrapped := Chain(wrappers...)(j)
-	next := s.Next(time.Now())
-
-	id := EntryID(c.nextID.Add(1))
-	e := &entry{
-		id:       id,
-		name:     ec.name,
-		spec:     spec,
-		schedule: s,
-		wrapped:  wrapped,
-		timeout:  ec.timeout,
-		next:     next,
-	}
-
-	c.mu.Lock()
-	if c.cfg.maxEntries > 0 && len(c.byEntry) >= c.cfg.maxEntries {
-		c.mu.Unlock()
-		return 0, ErrCapacityReached
-	}
-	if !e.next.IsZero() {
-		e.item = c.h.Push(e.next.UnixNano(), e)
-	}
-	c.byEntry[id] = e
-	view := entryView(e)
-	c.publishViewAdd(e, &view)
-	heapLen := c.h.Len()
-	c.mu.Unlock()
-
-	recordJobScheduled(c.cfg.recorder, e.name)
-	recordQueueDepth(c.cfg.recorder, heapLen)
-	c.hooks.emitSchedule(EventSchedule{
-		EntryID: id, Name: e.name, Schedule: s, Next: e.next,
-	})
-	c.wake()
-	return id, nil
+	return c.updateSchedule(id, "", s)
 }
 
 // Remove deregisters id. In-flight invocations continue; future automatic
@@ -229,35 +195,106 @@ func (c *Cron) Remove(id EntryID) bool {
 	return true
 }
 
-// Trigger fires id immediately. It returns ErrSchedulerNotRunning,
-// ErrEntryNotFound, or ErrConcurrencyLimit when dispatch is rejected.
-func (c *Cron) Trigger(id EntryID) error {
-	c.startMu.Lock()
-	defer c.startMu.Unlock()
-	if !c.running.Load() {
-		return ErrSchedulerNotRunning
-	}
-	fireAt := time.Now()
-
+// Pause suspends automatic fires for id, keeping the entry and its Prev.
+// Manual Trigger still works while paused. Returns false if id is unknown.
+func (c *Cron) Pause(id EntryID) bool {
 	c.mu.Lock()
 	e, ok := c.byEntry[id]
 	if !ok {
 		c.mu.Unlock()
-		return ErrEntryNotFound
+		return false
 	}
-	if !c.tryReserveInflight() {
-		c.mu.Unlock()
-		recordJobMissed(c.cfg.recorder, e.name, 0)
-		c.hooks.emitMissed(EventMissed{
-			EntryID: e.id, Name: e.name,
-			ScheduledAt: fireAt, Lateness: 0,
-			Policy: c.cfg.missedPolicy,
-		})
-		return ErrConcurrencyLimit
+	if !e.paused {
+		e.paused = true
+		e.gen++
+		e.next = time.Time{}
+		if e.item != nil {
+			c.h.Remove(e.item)
+			e.item = nil
+		}
+		view := entryView(e)
+		e.view.p.Store(&view)
 	}
-	c.dispatch(c.runCtx, e, fireAt, false, true)
+	heapLen := c.h.Len()
 	c.mu.Unlock()
-	return nil
+	c.wake()
+	recordQueueDepth(c.cfg.recorder, heapLen)
+	return true
+}
+
+// Resume re-enables automatic fires for id, scheduling from now. Returns
+// false if id is unknown.
+func (c *Cron) Resume(id EntryID) bool {
+	c.mu.Lock()
+	e, ok := c.byEntry[id]
+	if !ok {
+		c.mu.Unlock()
+		return false
+	}
+	if !e.paused {
+		c.mu.Unlock()
+		return true
+	}
+	gen := e.gen
+	s := e.schedule
+	c.mu.Unlock()
+
+	// Schedule.Next stays outside c.mu; see fireDue.
+	next := s.Next(time.Now())
+
+	c.mu.Lock()
+	cur, ok := c.byEntry[id]
+	if !ok || cur != e {
+		c.mu.Unlock()
+		return false
+	}
+	if cur.gen != gen {
+		// A racing Pause/Resume/Update won; its state stands.
+		c.mu.Unlock()
+		return true
+	}
+	cur.paused = false
+	cur.gen++
+	cur.next = next
+	if !next.IsZero() {
+		cur.item = c.h.Push(next.UnixNano(), cur)
+	}
+	view := entryView(cur)
+	cur.view.p.Store(&view)
+	name := cur.name
+	heapLen := c.h.Len()
+	c.mu.Unlock()
+
+	c.wake()
+	recordQueueDepth(c.cfg.recorder, heapLen)
+	if !next.IsZero() {
+		recordJobScheduled(c.cfg.recorder, name)
+		c.hooks.emitSchedule(EventSchedule{
+			EntryID: id, Name: name, Schedule: s, Next: next,
+		})
+	}
+	return true
+}
+
+// Trigger fires id immediately, bypassing jitter. It returns
+// ErrSchedulerNotRunning, ErrEntryNotFound, or ErrConcurrencyLimit when
+// dispatch is rejected. Paused entries can still be triggered.
+func (c *Cron) Trigger(id EntryID) error { return c.trigger(id, nil) }
+
+// TriggerAndWait fires id like Trigger and blocks until the invocation
+// returns, yielding the job's error. ctx bounds only the wait; on ctx
+// cancellation the job keeps running.
+func (c *Cron) TriggerAndWait(ctx context.Context, id EntryID) error {
+	result := make(chan error, 1)
+	if err := c.trigger(id, result); err != nil {
+		return err
+	}
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Entry returns the current snapshot for id.
@@ -307,11 +344,17 @@ func (c *Cron) Start() error {
 	}
 	c.started = true
 	c.running.Store(true)
-	ctx, cancel := context.WithCancelCause(context.Background())
+	base := c.cfg.baseCtx
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, cancel := context.WithCancelCause(base)
 	c.runCtx = ctx
 	c.runCancel = cancel
+	loopCtx, loopCancel := context.WithCancel(ctx)
+	c.loopCancel = loopCancel
 	c.runDone = make(chan struct{})
-	go c.loop(ctx)
+	go c.loop(loopCtx)
 	return nil
 }
 
@@ -319,9 +362,9 @@ func (c *Cron) Start() error {
 // Trigger's returned error for race-free dispatch decisions.
 func (c *Cron) Running() bool { return c.running.Load() }
 
-// Stop halts the scheduler and waits for the loop, in-flight jobs and
-// hook dispatcher to drain, capped by ctx. Returns ctx.Err() on
-// timeout. Do not call it from inside a Job.
+// Stop halts the scheduler, cancels in-flight jobs (ErrCronStopping as the
+// cause), and waits for the loop, jobs and hook dispatcher to drain, capped
+// by ctx. Returns ctx.Err() on timeout. Do not call it from inside a Job.
 func (c *Cron) Stop(ctx context.Context) error {
 	c.startMu.Lock()
 	c.started = true
@@ -329,18 +372,209 @@ func (c *Cron) Stop(ctx context.Context) error {
 		c.startMu.Unlock()
 		return c.hooks.close(ctx)
 	}
+	c.running.Store(false)
+	c.runCancel(ErrCronStopping)
+	done := c.runDone
+	c.startMu.Unlock()
+	return c.awaitShutdown(ctx, done)
+}
+
+// Drain is Stop without cancelling in-flight jobs: it stops scheduling new
+// fires and waits for running jobs to finish naturally, capped by ctx.
+func (c *Cron) Drain(ctx context.Context) error {
+	c.startMu.Lock()
+	c.started = true
+	if c.runDone == nil {
+		c.startMu.Unlock()
+		return c.hooks.close(ctx)
+	}
 	if c.running.Swap(false) {
-		c.runCancel(ErrCronStopping)
+		c.loopCancel()
 	}
 	done := c.runDone
 	c.startMu.Unlock()
+	return c.awaitShutdown(ctx, done)
+}
 
+func (c *Cron) parse(spec string) (Schedule, error) {
+	s, err := c.parseCache.Get(spec, func() (Schedule, error) {
+		return c.cfg.parser.Parse(spec)
+	})
+	if err != nil {
+		// Don't pin invalid, often caller-controlled specs in the cache.
+		c.parseCache.Forget(spec)
+		return nil, err
+	}
+	return s, nil
+}
+
+func (c *Cron) add(spec string, s Schedule, j Job, opts ...EntryOption) (EntryID, error) {
+	if s == nil {
+		return 0, ErrNilSchedule
+	}
+	if j == nil {
+		return 0, ErrNilJob
+	}
+	ec := entryConfig{}
+	for _, o := range opts {
+		o(&ec)
+	}
+
+	wrappers := make([]Wrapper, 0, len(c.cfg.chain)+len(ec.chain)+1)
+	wrappers = append(wrappers, c.cfg.chain...)
+	wrappers = append(wrappers, ec.chain...)
+	rp := c.cfg.retry
+	if ec.retrySet {
+		rp = ec.retry
+	}
+	if !rp.IsZero() {
+		wrappers = append(wrappers, rp.Wrapper())
+	}
+	wrapped := Chain(wrappers...)(j)
+
+	missed := c.cfg.missedPolicy
+	if ec.missedSet {
+		missed = ec.missed
+	}
+	jitter := c.cfg.jitter
+	if ec.jitterSet {
+		jitter = ec.jitter
+	}
+	anchor := ec.lastRun
+	if anchor.IsZero() {
+		anchor = time.Now()
+	}
+	next := s.Next(anchor)
+
+	id := EntryID(c.nextID.Add(1))
+	e := &entry{
+		id:       id,
+		name:     ec.name,
+		spec:     spec,
+		schedule: s,
+		wrapped:  wrapped,
+		timeout:  ec.timeout,
+		jitter:   jitter,
+		missed:   missed,
+		next:     next,
+		prev:     ec.lastRun,
+	}
+
+	c.mu.Lock()
+	if c.cfg.maxEntries > 0 && len(c.byEntry) >= c.cfg.maxEntries {
+		c.mu.Unlock()
+		return 0, ErrCapacityReached
+	}
+	if !e.next.IsZero() {
+		e.item = c.h.Push(e.next.UnixNano(), e)
+	}
+	c.byEntry[id] = e
+	view := entryView(e)
+	c.publishViewAdd(e, &view)
+	heapLen := c.h.Len()
+	c.mu.Unlock()
+
+	recordJobScheduled(c.cfg.recorder, e.name)
+	recordQueueDepth(c.cfg.recorder, heapLen)
+	c.hooks.emitSchedule(EventSchedule{
+		EntryID: id, Name: e.name, Schedule: s, Next: e.next,
+	})
+	c.wake()
+	return id, nil
+}
+
+func (c *Cron) updateSchedule(id EntryID, spec string, s Schedule) error {
+	next := s.Next(time.Now())
+
+	c.mu.Lock()
+	e, ok := c.byEntry[id]
+	if !ok {
+		c.mu.Unlock()
+		return ErrEntryNotFound
+	}
+	e.spec, e.schedule = spec, s
+	e.gen++
+	if e.item != nil {
+		c.h.Remove(e.item)
+		e.item = nil
+	}
+	if e.paused {
+		e.next = time.Time{}
+	} else {
+		e.next = next
+		if !next.IsZero() {
+			e.item = c.h.Push(next.UnixNano(), e)
+		}
+	}
+	view := entryView(e)
+	e.view.p.Store(&view)
+	name := e.name
+	emitNext := e.next
+	heapLen := c.h.Len()
+	c.mu.Unlock()
+
+	c.wake()
+	recordQueueDepth(c.cfg.recorder, heapLen)
+	if !emitNext.IsZero() {
+		recordJobScheduled(c.cfg.recorder, name)
+		c.hooks.emitSchedule(EventSchedule{
+			EntryID: id, Name: name, Schedule: s, Next: emitNext,
+		})
+	}
+	return nil
+}
+
+func (c *Cron) trigger(id EntryID, result chan<- error) error {
+	c.startMu.Lock()
+	defer c.startMu.Unlock()
+	if !c.running.Load() {
+		return ErrSchedulerNotRunning
+	}
+	fireAt := time.Now()
+
+	c.mu.Lock()
+	e, ok := c.byEntry[id]
+	if !ok {
+		c.mu.Unlock()
+		return ErrEntryNotFound
+	}
+	if !c.tryReserveInflight() {
+		c.mu.Unlock()
+		recordJobMissed(c.cfg.recorder, e.name, 0)
+		c.hooks.emitMissed(EventMissed{
+			EntryID: e.id, Name: e.name,
+			ScheduledAt: fireAt, Lateness: 0,
+			Policy: e.missed,
+		})
+		return ErrConcurrencyLimit
+	}
+	c.dispatch(c.runCtx, e, fireAt, fireOpts{manual: true, result: result})
+	c.mu.Unlock()
+	return nil
+}
+
+// publishViewAdd creates the entry's stable snapshot cell and inserts it. O(1).
+func (c *Cron) publishViewAdd(e *entry, view *Entry) {
+	cell := &viewCell{}
+	cell.p.Store(view)
+	e.view = cell
+	c.viewMu.Lock()
+	c.views[e.id] = cell
+	c.viewMu.Unlock()
+}
+
+func (c *Cron) publishViewRemove(id EntryID) {
+	c.viewMu.Lock()
+	delete(c.views, id)
+	c.viewMu.Unlock()
+}
+
+func (c *Cron) awaitShutdown(ctx context.Context, done <-chan struct{}) error {
 	select {
 	case <-done:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-
 	wait := make(chan struct{})
 	go func() {
 		c.wg.Wait()
@@ -351,7 +585,6 @@ func (c *Cron) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-
 	return c.hooks.close(ctx)
 }
 
@@ -367,7 +600,9 @@ func (c *Cron) loop(ctx context.Context) {
 			return
 		case <-c.wakeCh:
 		case <-timer.C:
-			c.fireDue(ctx, time.Now())
+			// Jobs parent off runCtx, not the loop ctx, so Drain can stop the
+			// loop without cancelling them.
+			c.fireDue(c.runCtx, time.Now())
 		}
 	}
 }
@@ -401,7 +636,7 @@ func (c *Cron) fireDue(ctx context.Context, now time.Time) {
 		c.h.Pop()
 		e := it.Value
 		e.item = nil
-		due = append(due, dueFire{e: e, scheduled: e.next})
+		due = append(due, dueFire{e: e, schedule: e.schedule, scheduled: e.next, gen: e.gen})
 	}
 	c.mu.Unlock()
 
@@ -417,32 +652,47 @@ func (c *Cron) fireDue(ctx context.Context, now time.Time) {
 func (c *Cron) makeFirePlan(d dueFire, now time.Time) firePlan {
 	p := firePlan{
 		e:         d.e,
+		schedule:  d.schedule,
+		gen:       d.gen,
 		scheduled: d.scheduled,
 		lateness:  now.Sub(d.scheduled),
 	}
 	if p.lateness > c.cfg.missedTolerance {
 		p.missed = true
-		if c.cfg.missedPolicy == MissedRunOnce {
-			p.fireOne = c.findMostRecentMissed(d.e.schedule, d.scheduled, now)
+		switch d.e.missed {
+		case MissedRunOnce:
+			p.fireOne = findMostRecentMissed(d.schedule, d.scheduled, now)
+		case MissedRunAll:
+			p.fireAll = findAllMissed(d.schedule, d.scheduled, now)
 		}
 	} else {
 		p.fireOne = d.scheduled
 	}
-	p.nextFire = d.e.schedule.Next(now)
+	p.nextFire = d.schedule.Next(now)
 	return p
 }
 
 func (c *Cron) commitAndDispatch(ctx context.Context, p firePlan) {
 	c.mu.Lock()
 	cur, ok := c.byEntry[p.e.id]
-	if !ok || cur != p.e {
+	if !ok || cur != p.e || cur.gen != p.gen {
+		// Removed, paused, resumed, or updated since the pop; the plan is stale.
 		c.mu.Unlock()
 		return
 	}
 
-	reserved := false
-	if !p.fireOne.IsZero() {
-		reserved = c.tryReserveInflight()
+	fires := p.fireAll
+	if len(fires) == 0 && !p.fireOne.IsZero() {
+		fires = []time.Time{p.fireOne}
+	}
+	var run []time.Time
+	rejected := 0
+	for _, ft := range fires {
+		if c.tryReserveInflight() {
+			run = append(run, ft)
+		} else {
+			rejected++
+		}
 	}
 
 	cur.next = p.nextFire
@@ -452,11 +702,12 @@ func (c *Cron) commitAndDispatch(ctx context.Context, p firePlan) {
 	view := entryView(cur)
 	cur.view.p.Store(&view)
 
-	if reserved {
-		c.dispatch(ctx, cur, p.fireOne, true, false)
+	for _, ft := range run {
+		c.dispatch(ctx, cur, ft, fireOpts{advancePrev: true})
 	}
 	nextEmit := cur.next
 	name := cur.name
+	policy := cur.missed
 	c.mu.Unlock()
 
 	if p.missed {
@@ -464,70 +715,37 @@ func (c *Cron) commitAndDispatch(ctx context.Context, p firePlan) {
 		c.hooks.emitMissed(EventMissed{
 			EntryID: p.e.id, Name: name,
 			ScheduledAt: p.scheduled, Lateness: p.lateness,
-			Policy: c.cfg.missedPolicy,
+			Policy: policy,
 		})
-	}
-	if !p.missed && !p.fireOne.IsZero() && !reserved {
-		// !p.missed: the block above already emitted for a late fire that also
-		// hit the concurrency limit; don't emit twice for one due fire.
+	} else if !p.fireOne.IsZero() && rejected > 0 {
+		// On-time fire rejected by the concurrency limit; late fires already
+		// emitted one missed event above.
 		lateness := time.Since(p.fireOne)
 		recordJobMissed(c.cfg.recorder, name, lateness)
 		c.hooks.emitMissed(EventMissed{
 			EntryID: p.e.id, Name: name,
 			ScheduledAt: p.fireOne, Lateness: lateness,
-			Policy: c.cfg.missedPolicy,
+			Policy: policy,
 		})
 	}
 	if !nextEmit.IsZero() {
 		recordJobScheduled(c.cfg.recorder, name)
 		c.hooks.emitSchedule(EventSchedule{
 			EntryID: p.e.id, Name: name,
-			Schedule: p.e.schedule, Next: nextEmit,
+			Schedule: p.schedule, Next: nextEmit,
 		})
 	}
 }
 
-func (c *Cron) findMostRecentMissed(s Schedule, lastFire, now time.Time) time.Time {
-	if lastFire.IsZero() || lastFire.After(now) {
-		return time.Time{}
-	}
-	last := lastFire
-	cursor := lastFire
-	for range missedRunOnceCap {
-		next := s.Next(cursor)
-		if next.IsZero() || next.After(now) {
-			return last
-		}
-		last = next
-		cursor = next
-	}
-	return last
-}
-
-func (c *Cron) tryReserveInflight() bool {
-	if c.cfg.maxConcurrent <= 0 {
-		c.inflight.Add(1)
-		return true
-	}
-	limit := int64(c.cfg.maxConcurrent)
-	for {
-		cur := c.inflight.Load()
-		if cur >= limit {
-			return false
-		}
-		if c.inflight.CompareAndSwap(cur, cur+1) {
-			return true
-		}
-	}
-}
-
-func (c *Cron) dispatch(parent context.Context, e *entry, scheduledAt time.Time, advancePrev, manual bool) {
+func (c *Cron) dispatch(parent context.Context, e *entry, scheduledAt time.Time, opts fireOpts) {
 	c.wg.Go(func() {
 		defer c.inflight.Add(-1)
 
 		// Jitter waits on the run ctx, not the job-timeout ctx, so it never eats
 		// the timeout budget; manual Trigger fires immediately.
-		if !manual && !c.applyJitter(parent) {
+		// Manual triggers carry opts.result and skip jitter, so this abort path
+		// never owes a result.
+		if !opts.manual && !c.applyJitter(parent, e.jitter) {
 			// Reachable only when Stop cancels mid-jitter; record it so the
 			// reserved fire isn't dropped silently.
 			lateness := time.Since(scheduledAt)
@@ -535,7 +753,7 @@ func (c *Cron) dispatch(parent context.Context, e *entry, scheduledAt time.Time,
 			c.hooks.emitMissed(EventMissed{
 				EntryID: e.id, Name: e.name,
 				ScheduledAt: scheduledAt, Lateness: lateness,
-				Policy: c.cfg.missedPolicy,
+				Policy: e.missed,
 			})
 			return
 		}
@@ -555,7 +773,7 @@ func (c *Cron) dispatch(parent context.Context, e *entry, scheduledAt time.Time,
 			EntryID: e.id, Name: e.name,
 			ScheduledAt: scheduledAt, FireAt: fireAt,
 		})
-		err := e.wrapped.Run(jobCtx)
+		err := c.runJob(jobCtx, e)
 		dur := time.Since(fireAt)
 		recordJobCompleted(c.cfg.recorder, e.name, dur, err)
 		c.hooks.emitJobComplete(EventJobComplete{
@@ -564,10 +782,30 @@ func (c *Cron) dispatch(parent context.Context, e *entry, scheduledAt time.Time,
 			Duration: dur,
 			Err:      err,
 		})
-		if advancePrev {
+		if opts.advancePrev {
 			c.advancePrev(e.id, scheduledAt)
 		}
+		if opts.result != nil {
+			opts.result <- err
+		}
 	})
+}
+
+// runJob executes the wrapped job, converting panics into ErrJobPanic unless
+// WithoutRecover was set.
+func (c *Cron) runJob(ctx context.Context, e *entry) (err error) {
+	if !c.cfg.recoverDisabled {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("%w: %v", ErrJobPanic, r)
+				c.cfg.logger.Error("cron: job panic recovered",
+					slog.String("name", e.name),
+					slog.Any("panic", r),
+					slog.String("stack", string(debug.Stack())))
+			}
+		}()
+	}
+	return e.wrapped.Run(ctx)
 }
 
 func (c *Cron) advancePrev(id EntryID, fireAt time.Time) {
@@ -585,6 +823,23 @@ func (c *Cron) advancePrev(id EntryID, fireAt time.Time) {
 	cur.view.p.Store(&view)
 }
 
+func (c *Cron) tryReserveInflight() bool {
+	if c.cfg.maxConcurrent <= 0 {
+		c.inflight.Add(1)
+		return true
+	}
+	limit := int64(c.cfg.maxConcurrent)
+	for {
+		cur := c.inflight.Load()
+		if cur >= limit {
+			return false
+		}
+		if c.inflight.CompareAndSwap(cur, cur+1) {
+			return true
+		}
+	}
+}
+
 func (c *Cron) heapLen() int {
 	c.mu.Lock()
 	n := c.h.Len()
@@ -599,11 +854,11 @@ func (c *Cron) wake() {
 	}
 }
 
-func (c *Cron) applyJitter(ctx context.Context) bool {
-	if c.cfg.jitter <= 0 {
+func (c *Cron) applyJitter(ctx context.Context, max time.Duration) bool {
+	if max <= 0 {
 		return true
 	}
-	d := mathrand.N(c.cfg.jitter)
+	d := mathrand.N(max)
 	if d <= 0 {
 		return true
 	}
@@ -617,6 +872,45 @@ func (c *Cron) applyJitter(ctx context.Context) bool {
 	}
 }
 
+func findMostRecentMissed(s Schedule, lastFire, now time.Time) time.Time {
+	if lastFire.IsZero() || lastFire.After(now) {
+		return time.Time{}
+	}
+	last := lastFire
+	cursor := lastFire
+	for range missedScanCap {
+		next := s.Next(cursor)
+		if next.IsZero() || next.After(now) {
+			return last
+		}
+		last = next
+		cursor = next
+	}
+	return last
+}
+
+// findAllMissed returns every missed instant in [lastFire, now], keeping the
+// newest missedRunAllCap when the backlog is larger.
+func findAllMissed(s Schedule, lastFire, now time.Time) []time.Time {
+	if lastFire.IsZero() || lastFire.After(now) {
+		return nil
+	}
+	all := []time.Time{lastFire}
+	cursor := lastFire
+	for range missedScanCap {
+		next := s.Next(cursor)
+		if next.IsZero() || next.After(now) {
+			break
+		}
+		all = append(all, next)
+		cursor = next
+	}
+	if len(all) > missedRunAllCap {
+		all = all[len(all)-missedRunAllCap:]
+	}
+	return all
+}
+
 func entryView(e *entry) Entry {
 	return Entry{
 		ID:       e.id,
@@ -625,6 +919,7 @@ func entryView(e *entry) Entry {
 		Schedule: e.schedule,
 		Prev:     e.prev,
 		Next:     e.next,
+		Paused:   e.paused,
 	}
 }
 

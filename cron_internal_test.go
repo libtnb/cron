@@ -82,18 +82,16 @@ func (s *blockingFirstSchedule) Next(time.Time) time.Time {
 }
 
 func TestFindMostRecentMissed_LastFireZero(t *testing.T) {
-	c := New()
 	now := time.Now()
-	got := c.findMostRecentMissed(ConstantDelay(time.Minute), time.Time{}, now)
+	got := findMostRecentMissed(ConstantDelay(time.Minute), time.Time{}, now)
 	if !got.IsZero() {
 		t.Fatalf("got %v, want zero", got)
 	}
 }
 
 func TestFindMostRecentMissed_LastFireAfterNow(t *testing.T) {
-	c := New()
 	now := time.Now()
-	got := c.findMostRecentMissed(ConstantDelay(time.Minute), now.Add(time.Hour), now)
+	got := findMostRecentMissed(ConstantDelay(time.Minute), now.Add(time.Hour), now)
 	if !got.IsZero() {
 		t.Fatalf("got %v, want zero", got)
 	}
@@ -106,9 +104,8 @@ func (s neverEndingSchedule) Next(now time.Time) time.Time {
 }
 
 func TestFindMostRecentMissed_HitsCap(t *testing.T) {
-	c := New()
 	now := time.Now()
-	got := c.findMostRecentMissed(neverEndingSchedule{step: time.Nanosecond}, now.Add(-time.Hour), now)
+	got := findMostRecentMissed(neverEndingSchedule{step: time.Nanosecond}, now.Add(-time.Hour), now)
 	if got.IsZero() {
 		t.Fatal("got zero, expected last set during iteration")
 	}
@@ -124,9 +121,8 @@ func (s *zeroNextSchedule) Next(now time.Time) time.Time {
 }
 
 func TestFindMostRecentMissed_ZeroNextStopsLoop(t *testing.T) {
-	c := New()
 	now := time.Now()
-	_ = c.findMostRecentMissed(&zeroNextSchedule{}, now.Add(-time.Hour), now)
+	_ = findMostRecentMissed(&zeroNextSchedule{}, now.Add(-time.Hour), now)
 }
 
 func TestAdvancePrev_NoOpWhenEntryRemoved(t *testing.T) {
@@ -219,6 +215,141 @@ func TestCron_AddScheduleComputesNextOutsideMu(t *testing.T) {
 	<-addDone
 }
 
+func TestSpecSchedule_ZeroValueReturnsZero(t *testing.T) {
+	var s SpecSchedule
+	if got := s.Next(time.Now()); !got.IsZero() {
+		t.Fatalf("zero-value Next = %v, want zero", got)
+	}
+}
+
+func TestFindAllMissed(t *testing.T) {
+	now := time.Now()
+
+	if got := findAllMissed(ConstantDelay(time.Minute), time.Time{}, now); got != nil {
+		t.Fatalf("zero lastFire: got %v", got)
+	}
+	if got := findAllMissed(ConstantDelay(time.Minute), now.Add(time.Hour), now); got != nil {
+		t.Fatalf("future lastFire: got %v", got)
+	}
+
+	got := findAllMissed(ConstantDelay(time.Minute), now.Add(-150*time.Second), now)
+	if len(got) < 2 || len(got) > 4 {
+		t.Fatalf("~2.5min backlog at 1min cadence: got %d instants", len(got))
+	}
+	for i := 1; i < len(got); i++ {
+		if !got[i].After(got[i-1]) {
+			t.Fatalf("instants not increasing: %v", got)
+		}
+	}
+}
+
+func TestFindAllMissed_CapKeepsNewest(t *testing.T) {
+	now := time.Now()
+	lastFire := now.Add(-time.Duration(missedRunAllCap+500) * time.Second)
+	got := findAllMissed(ConstantDelay(time.Second), lastFire, now)
+	if len(got) != missedRunAllCap {
+		t.Fatalf("len = %d, want cap %d", len(got), missedRunAllCap)
+	}
+	if got[0].Sub(lastFire) < 400*time.Second {
+		t.Fatalf("cap should keep the newest instants, first kept = %v", got[0])
+	}
+}
+
+func TestMakeFirePlan_Policies(t *testing.T) {
+	c := New(WithLocation(time.UTC), WithMissedTolerance(time.Second))
+	now := time.Now()
+	sched := ConstantDelay(time.Minute)
+
+	onTime := c.makeFirePlan(dueFire{
+		e: &entry{missed: MissedSkip}, schedule: sched, scheduled: now.Add(-10 * time.Millisecond),
+	}, now)
+	if onTime.missed || onTime.fireOne.IsZero() || onTime.fireAll != nil {
+		t.Fatalf("on-time plan = %+v", onTime)
+	}
+
+	skip := c.makeFirePlan(dueFire{
+		e: &entry{missed: MissedSkip}, schedule: sched, scheduled: now.Add(-time.Hour),
+	}, now)
+	if !skip.missed || !skip.fireOne.IsZero() || skip.fireAll != nil {
+		t.Fatalf("skip plan = %+v", skip)
+	}
+
+	runOnce := c.makeFirePlan(dueFire{
+		e: &entry{missed: MissedRunOnce}, schedule: sched, scheduled: now.Add(-time.Hour),
+	}, now)
+	if !runOnce.missed || runOnce.fireOne.IsZero() {
+		t.Fatalf("run-once plan = %+v", runOnce)
+	}
+
+	runAll := c.makeFirePlan(dueFire{
+		e: &entry{missed: MissedRunAll}, schedule: sched, scheduled: now.Add(-3 * time.Minute),
+	}, now)
+	if !runAll.missed || len(runAll.fireAll) < 2 {
+		t.Fatalf("run-all plan = %+v", runAll)
+	}
+}
+
+func TestCommitAndDispatch_StaleGenDiscarded(t *testing.T) {
+	c := New(WithLocation(time.UTC))
+	var runs atomic.Int32
+	id, _ := c.AddSchedule(ConstantDelay(time.Hour), JobFunc(func(context.Context) error {
+		runs.Add(1)
+		return nil
+	}))
+	c.mu.Lock()
+	e := c.byEntry[id]
+	plan := firePlan{
+		e: e, schedule: e.schedule, gen: e.gen + 1, // stale
+		scheduled: time.Now(), fireOne: time.Now(),
+	}
+	c.mu.Unlock()
+
+	c.commitAndDispatch(context.Background(), plan)
+	if runs.Load() != 0 {
+		t.Fatal("stale-gen plan must not dispatch")
+	}
+}
+
+// gateSchedule blocks its second Next call until released, so a test can
+// interleave another mutation while Resume computes the next fire.
+type gateSchedule struct {
+	entered chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (g *gateSchedule) Next(now time.Time) time.Time {
+	if g.calls.Add(1) == 2 {
+		g.entered <- struct{}{}
+		<-g.release
+	}
+	return now.Add(time.Hour)
+}
+
+func TestResume_LosesRaceToConcurrentUpdate(t *testing.T) {
+	c := New(WithLocation(time.UTC))
+	g := &gateSchedule{entered: make(chan struct{}), release: make(chan struct{})}
+	id, _ := c.AddSchedule(g, JobFunc(func(context.Context) error { return nil })) // Next call #1
+	c.Pause(id)
+
+	resumed := make(chan bool)
+	go func() { resumed <- c.Resume(id) }() // blocks in Next call #2
+
+	<-g.entered
+	if err := c.UpdateSchedule(id, ConstantDelay(time.Hour)); err != nil { // bumps gen
+		t.Fatal(err)
+	}
+	close(g.release)
+
+	if !<-resumed {
+		t.Fatal("Resume should report true when losing the race")
+	}
+	e, _ := c.Entry(id)
+	if !e.Paused {
+		t.Fatal("the racing Update's paused state must stand")
+	}
+}
+
 func TestCompareNext(t *testing.T) {
 	z := time.Time{}
 	early := time.Unix(100, 0)
@@ -240,5 +371,25 @@ func TestCompareNext(t *testing.T) {
 		if (got < 0) != (c.want < 0) || (got > 0) != (c.want > 0) {
 			t.Errorf("%s: compareNext = %d, want sign of %d", c.name, got, c.want)
 		}
+	}
+}
+
+func TestResume_EntryRemovedDuringNext(t *testing.T) {
+	c := New(WithLocation(time.UTC))
+	g := &gateSchedule{entered: make(chan struct{}), release: make(chan struct{})}
+	id, _ := c.AddSchedule(g, JobFunc(func(context.Context) error { return nil })) // Next call #1
+	c.Pause(id)
+
+	resumed := make(chan bool)
+	go func() { resumed <- c.Resume(id) }() // blocks in Next call #2
+
+	<-g.entered
+	if !c.Remove(id) {
+		t.Fatal("Remove failed")
+	}
+	close(g.release)
+
+	if <-resumed {
+		t.Fatal("Resume should report false when the entry vanished")
 	}
 }

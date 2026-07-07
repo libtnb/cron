@@ -55,3 +55,74 @@ func IsTriggered(s Schedule) bool {
 	_, ok := s.(triggeredSchedule)
 	return ok
 }
+
+type onceAt time.Time
+
+// OnceAt fires exactly once, at t. If t is already past, it never fires.
+func OnceAt(t time.Time) Schedule { return onceAt(t) }
+
+func (o onceAt) Next(now time.Time) time.Time {
+	if at := time.Time(o); now.Before(at) {
+		return at
+	}
+	return time.Time{}
+}
+
+func (o onceAt) String() string {
+	return "@at " + time.Time(o).Format(time.RFC3339Nano)
+}
+
+type unionSchedule []Schedule
+
+// Union fires whenever any of the schedules fires. Nil members are ignored;
+// an empty union never fires.
+func Union(schedules ...Schedule) Schedule {
+	u := make(unionSchedule, 0, len(schedules))
+	for _, s := range schedules {
+		if s != nil {
+			u = append(u, s)
+		}
+	}
+	return u
+}
+
+func (u unionSchedule) Next(now time.Time) time.Time {
+	var best time.Time
+	for _, s := range u {
+		n := s.Next(now)
+		if !n.IsZero() && (best.IsZero() || n.Before(best)) {
+			best = n
+		}
+	}
+	return best
+}
+
+// filterScanCap bounds Filter's search for the next kept firing.
+const filterScanCap = 100000
+
+type filterSchedule struct {
+	s    Schedule
+	keep func(time.Time) bool
+}
+
+// Filter wraps s, skipping firings for which keep returns false — e.g. a
+// holiday calendar. A nil keep passes everything through. The search gives up
+// (returns zero) after filterScanCap consecutive rejections.
+func Filter(s Schedule, keep func(time.Time) bool) Schedule {
+	return filterSchedule{s: s, keep: keep}
+}
+
+func (f filterSchedule) Next(now time.Time) time.Time {
+	if f.s == nil {
+		return time.Time{}
+	}
+	cur := now
+	for range filterScanCap {
+		n := f.s.Next(cur)
+		if n.IsZero() || f.keep == nil || f.keep(n) {
+			return n
+		}
+		cur = n
+	}
+	return time.Time{}
+}

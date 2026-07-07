@@ -19,7 +19,8 @@ type Entry struct {
 	Spec     string // empty for AddSchedule entries
 	Schedule Schedule
 	Prev     time.Time // zero if never fired
-	Next     time.Time // zero if exhausted or TriggeredSchedule
+	Next     time.Time // zero if exhausted, paused, or TriggeredSchedule
+	Paused   bool
 }
 
 // Valid reports whether e refers to a registered entry. Zero is invalid.
@@ -38,6 +39,9 @@ func (e Entry) LogValue() slog.Value {
 	}
 	if !e.Next.IsZero() {
 		attrs = append(attrs, slog.Time("next", e.Next))
+	}
+	if e.Paused {
+		attrs = append(attrs, slog.Bool("paused", true))
 	}
 	return slog.GroupValue(attrs...)
 }

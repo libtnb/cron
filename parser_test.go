@@ -238,7 +238,7 @@ func TestParser_ParseErrors(t *testing.T) {
 		{"* 24 * * *", "above maximum"}, // hour above 23
 		{"* * 0 * *", "below minimum"},  // dom min=1
 		{"* * * 13 *", "above maximum"}, // month above 12
-		{"* * * * 7", "above maximum"},  // dow above 6
+		{"* * * * 8", "above maximum"},  // dow above 7
 		{"5-3 * * * *", "beyond end"},
 		{"abc-3 * * * *", "not a valid number or name"}, // range LHS not numeric
 		{"1-abc * * * *", "not a valid number or name"}, // range RHS not numeric
@@ -319,7 +319,7 @@ func TestParser_SecondsFieldErrors(t *testing.T) {
 		"* * 24 * * *", // hour above 23
 		"* * * 0 * *",  // dom below 1
 		"* * * * 13 *", // month above 12
-		"* * * * * 7",  // dow above 6
+		"* * * * * 8",  // dow above 7
 	}
 	for _, spec := range cases {
 		t.Run(spec, func(t *testing.T) {

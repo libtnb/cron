@@ -10,6 +10,7 @@ func TestMissedFirePolicy_String(t *testing.T) {
 	cases := map[cron.MissedFirePolicy]string{
 		cron.MissedSkip:            "skip",
 		cron.MissedRunOnce:         "run-once",
+		cron.MissedRunAll:          "run-all",
 		cron.MissedFirePolicy(255): "unknown",
 	}
 	for p, want := range cases {

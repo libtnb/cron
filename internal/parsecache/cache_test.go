@@ -81,26 +81,37 @@ func TestCache_Forget(t *testing.T) {
 	}
 }
 
-func TestCache_LookupHitAndMiss(t *testing.T) {
+func TestCache_ForgetMissingIsNoop(t *testing.T) {
 	var c Cache[int]
-	if _, _, ok := c.Lookup("missing"); ok {
-		t.Fatal("Lookup should miss for uncached spec")
-	}
-	build := func() (int, error) { return 7, nil }
-	_, _ = c.Get("k", build)
-	v, err, ok := c.Lookup("k")
-	if !ok || err != nil || v != 7 {
-		t.Fatalf("Lookup = %d, %v, %v", v, err, ok)
+	c.Forget("missing")
+	if c.Len() != 0 {
+		t.Fatalf("Len = %d", c.Len())
 	}
 }
 
-func TestCache_LookupReturnsCachedError(t *testing.T) {
-	var c Cache[int]
-	boom := errors.New("boom")
-	build := func() (int, error) { return 0, boom }
-	_, _ = c.Get("bad", build)
-	_, err, ok := c.Lookup("bad")
-	if !ok || !errors.Is(err, boom) {
-		t.Fatalf("Lookup err=%v ok=%v", err, ok)
+func TestCache_LimitStopsMemoising(t *testing.T) {
+	c := Cache[int]{Limit: 1}
+	var calls atomic.Int32
+	build := func() (int, error) { calls.Add(1); return 9, nil }
+
+	_, _ = c.Get("a", build) // stored
+	_, _ = c.Get("b", build) // over limit: built, not stored
+	_, _ = c.Get("b", build) // built again
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("calls = %d, want 3", got)
+	}
+	if c.Len() != 1 {
+		t.Fatalf("Len = %d, want 1", c.Len())
+	}
+	_, _ = c.Get("a", build) // cached hit
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("calls after hit = %d, want 3", got)
+	}
+
+	c.Forget("a") // frees a slot
+	_, _ = c.Get("b", build)
+	_, _ = c.Get("b", build)
+	if got := calls.Load(); got != 4 {
+		t.Fatalf("calls after forget = %d, want 4 (b memoised)", got)
 	}
 }

@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"context"
 	"log/slog"
 	"time"
 )
@@ -19,6 +20,7 @@ type config struct {
 	logger       *slog.Logger
 	chain        []Wrapper
 	jitter       time.Duration
+	baseCtx      context.Context
 
 	hooks           []any
 	hookBuffer      int
@@ -27,16 +29,22 @@ type config struct {
 	maxConcurrent   int
 	maxEntries      int
 
-	retry    RetryPolicy
-	recorder any
+	retry           RetryPolicy
+	recorder        any
+	recoverDisabled bool
 }
 
 type entryConfig struct {
-	name     string
-	timeout  time.Duration
-	chain    []Wrapper
-	retry    RetryPolicy
-	retrySet bool
+	name      string
+	timeout   time.Duration
+	chain     []Wrapper
+	retry     RetryPolicy
+	retrySet  bool
+	missed    MissedFirePolicy
+	missedSet bool
+	jitter    time.Duration
+	jitterSet bool
+	lastRun   time.Time
 }
 
 // WithLocation sets the default schedule timezone. Default is time.Local.
@@ -133,7 +141,48 @@ func WithEntryRetry(p RetryPolicy) EntryOption {
 }
 
 // WithRecorder installs a metrics subscriber. Values may implement any subset
-// of the recorder sub-interfaces.
+// of the recorder sub-interfaces. Methods are called concurrently from job
+// goroutines, the scheduler loop, and Add/Remove/Trigger callers; they must be
+// concurrency-safe and non-blocking.
 func WithRecorder(r any) Option {
 	return func(c *config) { c.recorder = r }
+}
+
+// WithoutRecover disables the built-in job panic recovery. By default a
+// panicking job is recovered into an ErrJobPanic-wrapped error; with this
+// option the panic propagates and crashes the process.
+func WithoutRecover() Option {
+	return func(c *config) { c.recoverDisabled = true }
+}
+
+// WithBaseContext sets the root context jobs inherit from. Cancelling it stops
+// firing and cancels in-flight jobs, like Stop but without waiting.
+func WithBaseContext(ctx context.Context) Option {
+	return func(c *config) { c.baseCtx = ctx }
+}
+
+// WithEntryMissedFire overrides the scheduler's missed-fire policy for one
+// entry.
+func WithEntryMissedFire(p MissedFirePolicy) EntryOption {
+	return func(e *entryConfig) {
+		e.missed = p
+		e.missedSet = true
+	}
+}
+
+// WithEntryJitter overrides the scheduler's jitter for one entry. Zero
+// disables jitter for the entry.
+func WithEntryJitter(max time.Duration) EntryOption {
+	return func(e *entryConfig) {
+		e.jitter = max
+		e.jitterSet = true
+	}
+}
+
+// WithLastRun seeds the entry's schedule anchor, usually the persisted time of
+// the last run before a restart. The first fire is computed from t instead of
+// now, so a missed-fire policy can catch up work missed while the process was
+// down. It also seeds Entry.Prev.
+func WithLastRun(t time.Time) EntryOption {
+	return func(e *entryConfig) { e.lastRun = t }
 }
