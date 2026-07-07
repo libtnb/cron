@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/libtnb/cron v0.3.0
+	github.com/libtnb/cron v0.5.2
 )
 
 require (

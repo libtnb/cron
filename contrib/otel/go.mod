@@ -3,7 +3,7 @@ module github.com/libtnb/cron/contrib/otel
 go 1.26.4
 
 require (
-	github.com/libtnb/cron v0.4.0
+	github.com/libtnb/cron v0.5.2
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/sdk v1.44.0
 	go.opentelemetry.io/otel/trace v1.44.0

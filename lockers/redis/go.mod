@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/go-redsync/redsync/v4 v4.17.0
-	github.com/libtnb/cron v0.3.0
+	github.com/libtnb/cron v0.5.2
 	github.com/redis/go-redis/v9 v9.21.0
 )
 
