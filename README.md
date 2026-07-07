@@ -105,6 +105,8 @@ func main() {
 | `github.com/libtnb/cron/parserext` | Quartz tokens (`L`, `N#M`, `NL`).                                               |
 | `github.com/libtnb/cron/lockers/redis` | Redis `Locker`/`Elector` (separate module).                                 |
 | `github.com/libtnb/cron/lockers/postgres` | Postgres `Locker`/`Elector` (separate module).                           |
+| `github.com/libtnb/cron/contrib/prometheus` | Prometheus metrics recorder (separate module).                         |
+| `github.com/libtnb/cron/contrib/otel` | OpenTelemetry tracing wrapper (separate module).                              |
 
 ## Cron expressions
 
@@ -334,6 +336,22 @@ Recorders, unlike hooks, are not serialized: their methods are called inline
 and concurrently from job goroutines, the scheduler loop, and
 Add/Remove/Trigger callers. Implementations must be concurrency-safe and
 non-blocking.
+
+Ready-made observability lives in separate `contrib` modules, so the core
+stays dependency-free:
+
+```go
+// go get github.com/libtnb/cron/contrib/prometheus
+rec, _ := cronprom.New() // cron_jobs_{started,completed,missed,skipped}_total,
+c := cron.New(cron.WithRecorder(rec)) // durations, lateness, queue depth...
+
+// go get github.com/libtnb/cron/contrib/otel
+c := cron.New(cron.WithChain(otelcron.Wrapper())) // one span per run, named
+// after the entry via cron.EntryInfoFromContext, error status recorded
+```
+
+Jobs and wrappers can identify their own invocation through
+`cron.EntryInfoFromContext(ctx)` (`ID`, `Name`, `ScheduledAt`).
 
 ## Workflow DAGs
 

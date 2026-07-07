@@ -110,3 +110,22 @@ jobs:
       - name: Test
         working-directory: lockers/postgres
         run: go test -race -timeout 10m ./...
+
+  contrib:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          cache: true
+          go-version: 'stable'
+      - name: Workspace against HEAD core
+        run: go work init . contrib/prometheus contrib/otel
+      - name: Test prometheus recorder
+        working-directory: contrib/prometheus
+        run: go test -race -timeout 10m ./...
+      - name: Test otel wrapper
+        working-directory: contrib/otel
+        run: go test -race -timeout 10m ./...
