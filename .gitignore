@@ -52,3 +52,7 @@ __debug_bin
 
 # Fuzz corpus
 testdata/fuzz/
+
+# Local Go workspace (CI creates its own)
+go.work
+go.work.sum

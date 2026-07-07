@@ -66,3 +66,47 @@ jobs:
         run: go test -run=^$ -fuzz=FuzzParser_StandardNeverPanics -fuzztime=30s .
       - name: Fuzz Next vs linear scan (short)
         run: go test -run=^$ -fuzz=FuzzSpecScheduleNext -fuzztime=30s .
+
+  lockers-redis:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          cache: true
+          go-version: 'stable'
+      - name: Workspace against HEAD core
+        run: go work init . lockers/redis
+      - name: Test
+        working-directory: lockers/redis
+        run: go test -race -timeout 10m ./...
+
+  lockers-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      CRON_PG_TEST_DSN: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          cache: true
+          go-version: 'stable'
+      - name: Workspace against HEAD core
+        run: go work init . lockers/postgres
+      - name: Test
+        working-directory: lockers/postgres
+        run: go test -race -timeout 10m ./...
