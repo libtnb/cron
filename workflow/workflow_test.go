@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/libtnb/cron"
 	"github.com/libtnb/cron/workflow"
@@ -375,4 +376,108 @@ func TestCondition_MatchUnknownReturnsFalse(t *testing.T) {
 			workflow.After("A", workflow.Condition(99))),
 	)
 	_ = w.Run(context.Background())
+}
+
+func TestWorkflow_StepFuncDataFlow(t *testing.T) {
+	a := workflow.NewStepFunc("a", func(context.Context, workflow.Inputs) (any, error) {
+		return 2, nil
+	})
+	b := workflow.NewStepFunc("b", func(context.Context, workflow.Inputs) (any, error) {
+		return 3, nil
+	})
+	sum := workflow.NewStepFunc("sum", func(_ context.Context, in workflow.Inputs) (any, error) {
+		return in["a"].(int) + in["b"].(int), nil
+	}, workflow.After("a", workflow.OnSuccess), workflow.After("b", workflow.OnSuccess))
+
+	var exec *workflow.Execution
+	w := workflow.MustNew(a, b, sum).WithOnComplete(func(e *workflow.Execution) { exec = e })
+	if err := w.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := exec.Steps["sum"].Output; got != 5 {
+		t.Fatalf("sum output = %v, want 5", got)
+	}
+	if exec.StartedAt.IsZero() || exec.Duration < 0 {
+		t.Fatalf("execution timing not populated: %+v", exec)
+	}
+	if exec.Steps["a"].StartedAt.IsZero() {
+		t.Fatal("step timing not populated")
+	}
+}
+
+func TestWorkflow_StepFuncError(t *testing.T) {
+	boom := errors.New("boom")
+	fail := workflow.NewStepFunc("fail", func(context.Context, workflow.Inputs) (any, error) {
+		return "partial", boom
+	})
+	var exec *workflow.Execution
+	w := workflow.MustNew(fail).WithOnComplete(func(e *workflow.Execution) { exec = e })
+	if err := w.Run(context.Background()); !errors.Is(err, boom) {
+		t.Fatalf("err = %v", err)
+	}
+	rep := exec.Steps["fail"]
+	if rep.Result != workflow.ResultFailure || rep.Output != nil {
+		t.Fatalf("failed step report = %+v (output must be discarded)", rep)
+	}
+}
+
+func TestWorkflow_StepTimeout(t *testing.T) {
+	slow := workflow.NewStep("slow", cron.JobFunc(func(ctx context.Context) error {
+		<-ctx.Done()
+		return context.Cause(ctx)
+	})).WithTimeout(30 * time.Millisecond)
+
+	var exec *workflow.Execution
+	w := workflow.MustNew(slow).WithOnComplete(func(e *workflow.Execution) { exec = e })
+	err := w.Run(context.Background())
+	if !errors.Is(err, cron.ErrJobTimeout) {
+		t.Fatalf("err = %v, want ErrJobTimeout cause", err)
+	}
+	if exec.Steps["slow"].Duration < 30*time.Millisecond {
+		t.Fatalf("duration = %v", exec.Steps["slow"].Duration)
+	}
+}
+
+func TestWorkflow_StepRetry(t *testing.T) {
+	var attempts atomic.Int32
+	flaky := workflow.NewStep("flaky", cron.JobFunc(func(context.Context) error {
+		if attempts.Add(1) < 3 {
+			return errors.New("flaky")
+		}
+		return nil
+	})).WithRetry(cron.Retry(5, cron.RetryInitial(time.Millisecond)))
+
+	if err := workflow.MustNew(flaky).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("attempts = %d, want 3", got)
+	}
+}
+
+func TestWorkflow_NilJobRejected(t *testing.T) {
+	_, err := workflow.New(workflow.NewStep("x", nil))
+	if !errors.Is(err, workflow.ErrNilJob) {
+		t.Fatalf("err = %v, want ErrNilJob", err)
+	}
+	if !strings.Contains(err.Error(), `"x"`) {
+		t.Fatalf("error should name the step: %v", err)
+	}
+}
+
+func TestWorkflow_SkippedStepHasZeroTiming(t *testing.T) {
+	fail := workflow.NewStep("fail", cron.JobFunc(func(context.Context) error {
+		return errors.New("nope")
+	}))
+	after := workflow.NewStepFunc("after", func(context.Context, workflow.Inputs) (any, error) {
+		return nil, nil
+	}, workflow.After("fail", workflow.OnSuccess))
+
+	var exec *workflow.Execution
+	w := workflow.MustNew(fail, after).WithOnComplete(func(e *workflow.Execution) { exec = e })
+	_ = w.Run(context.Background())
+	rep := exec.Steps["after"]
+	if rep.Result != workflow.ResultSkipped || !rep.StartedAt.IsZero() {
+		t.Fatalf("skipped report = %+v", rep)
+	}
 }
