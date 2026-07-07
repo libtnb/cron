@@ -244,11 +244,9 @@ Postgres works through `database/sql` with any driver; create the tables once
 with `pglock.Migrate(ctx, db)`. Table names are customizable via
 `pglock.MigrateTables` plus `WithLocksTable`/`WithLeaderTable`.
 
-- Exactly-once needs every instance to compute identical fire instants: cron
-  expressions, `OnceAt`, and `AlignedDelay` (epoch-aligned interval) do.
-  `ConstantDelay`/`@every` anchors its phase at `Add` time, so staggered
-  instances claim different keys and each runs — the scheduler warns about
-  this combination; prefer `AlignedDelay` under a Locker.
+- Use schedules whose instants match across instances: cron expressions,
+  `OnceAt`, or `AlignedDelay`. `@every`'s phase is per-process (the scheduler
+  warns).
 - Override per entry with `WithEntryLocker(l)`; `WithEntryLocker(nil)` opts an
   entry out of the global locker.
 - Manual `Trigger`/`TriggerAndWait` bypass coordination: manual means "run it
