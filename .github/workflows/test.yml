@@ -64,3 +64,5 @@ jobs:
         run: go mod tidy
       - name: Fuzz parser (short)
         run: go test -run=^$ -fuzz=FuzzParser_StandardNeverPanics -fuzztime=30s .
+      - name: Fuzz Next vs linear scan (short)
+        run: go test -run=^$ -fuzz=FuzzSpecScheduleNext -fuzztime=30s .

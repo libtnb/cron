@@ -13,18 +13,25 @@ A modern, focused Go cron scheduler with no third-party dependencies.
 ## Features
 
 - Standard 5-field cron expressions plus `@hourly` / `@daily` / `@every 10s`
-  descriptors and a per-spec `TZ=` prefix.
-- Optional seconds field. `WithSeconds()` accepts both 5 and 6 fields;
-  `WithSeconds(true)` requires 6.
-- Quartz tokens (`L`, `N#M`, `NL`) via the `parserext` subpackage.
-- DAG jobs with conditional dependencies via the `workflow` subpackage.
+  descriptors, a per-spec `TZ=` prefix, and POSIX `7` as Sunday.
+- Optional seconds field via `WithSecondsField()` (or a custom parser).
+- Quartz tokens (`L`, `L-n`, `LW`, `nW`, `N#M`, `NL`, names like `FRI#3`) via
+  the `parserext` subpackage.
+- Schedule combinators: `OnceAt`, `Union`, and `Filter` (calendar exclusions).
+- DAG jobs with conditional dependencies, data flow between steps, and
+  per-step timeout/retry via the `workflow` subpackage.
 - Job wrappers in `wrap`: `Recover`, `Timeout`, `Retry`, `SkipIfRunning`,
-  `DelayIfRunning`.
+  `DelayIfRunning`. Job panics are recovered by default (`ErrJobPanic`).
 - Per-event hooks and recorders so you can plug in metrics and tracing.
-- Missed-fire policies (`MissedSkip`, `MissedRunOnce`) with a configurable
-  tolerance window for in-process stalls (VM suspend, clock jumps, backlog).
-- Manual `Trigger` and `TriggerByName`, with concurrency and entry limits.
-- DST-aware. Per-entry timeout, jitter, retry, name, and chain.
+- Missed-fire policies (`MissedSkip`, `MissedRunOnce`, `MissedRunAll`) with a
+  configurable tolerance window, overridable per entry; `WithLastRun` seeds
+  cross-restart catch-up.
+- Lifecycle control: `Pause`/`Resume`, in-place `Update`, graceful `Drain` or
+  cancelling `Stop`.
+- Manual `Trigger`, `TriggerAndWait`, and `TriggerByName`, with concurrency
+  and entry limits.
+- DST-correct scheduling (differentially fuzzed against a wall-clock scan).
+  Per-entry timeout, jitter, retry, missed-fire policy, name, and chain.
 
 ## Install
 
@@ -152,6 +159,24 @@ id, err := c.Add(
 id, err := c.AddSchedule(cron.ConstantDelay(time.Hour), job)
 ```
 
+Built-in schedules compose:
+
+```go
+c.AddSchedule(cron.OnceAt(deployTime), job)          // fire exactly once
+c.AddSchedule(cron.Union(weekdayNine, weekendTen), job)
+c.AddSchedule(cron.Filter(daily, notHoliday), job)   // skip filtered firings
+```
+
+Entries can be paused, resumed, and updated in place — the ID and `Prev`
+survive; `Update` re-parses the spec, `UpdateSchedule` swaps a programmatic
+schedule:
+
+```go
+c.Pause(id)  // manual Trigger still works while paused
+c.Resume(id) // reschedules from now
+err = c.Update(id, "*/10 * * * *")
+```
+
 ### Missed fires
 
 When a firing runs more than `WithMissedTolerance` (default `1s`) late,
@@ -160,9 +185,20 @@ When a firing runs more than `WithMissedTolerance` (default `1s`) late,
 - `MissedSkip` (default) drops the missed firing and waits for the next
   scheduled time.
 - `MissedRunOnce` runs the job once at the most recent missed time, then
-  resumes the regular schedule. This covers in-process stalls (VM suspend,
-  clock jumps, a backlog while the loop was blocked) — not restarts: a fresh
-  process has no record of firings missed while it was down.
+  resumes the regular schedule.
+- `MissedRunAll` runs the job once per missed firing (the newest 1000 are
+  kept), then resumes.
+
+The policy can be overridden per entry with `WithEntryMissedFire`, and jitter
+with `WithEntryJitter`. By themselves the policies cover in-process stalls
+(VM suspend, clock jumps, a backlog while the loop was blocked). To catch up
+across restarts, persist the last run time and seed it back:
+
+```go
+c.Add("0 2 * * *", job,
+	cron.WithLastRun(lastRunFromDB),             // first fire computes from here
+	cron.WithEntryMissedFire(cron.MissedRunOnce)) // -> the 02:00 you missed runs once
+```
 
 ## Triggering and removal
 
@@ -178,14 +214,22 @@ if err := c.Trigger(id); err != nil {
 	}
 }
 
+err = c.TriggerAndWait(ctx, id) // blocks and returns the job's error
+
 count, err := c.TriggerByName("daily-digest") // err joins per-entry failures
 
 c.Remove(id) // false if id is unknown
 ```
 
 `Remove` blocks future automatic fires and future `Trigger` calls for that
-entry. Jobs already dispatched keep running. `Stop` halts the loop and
-waits for in-flight jobs and the hook dispatcher, capped by the context.
+entry. Jobs already dispatched keep running. Two shutdown modes:
+
+- `Stop(ctx)` cancels in-flight jobs (`ErrCronStopping` as the cause) and
+  waits for the loop, jobs, and hook dispatcher, capped by ctx.
+- `Drain(ctx)` stops scheduling but lets in-flight jobs finish naturally.
+
+Job panics are recovered into `ErrJobPanic`-wrapped errors by default, so one
+bad job cannot crash the process; opt out with `WithoutRecover()`.
 
 ## Reading entries
 
@@ -251,7 +295,9 @@ static graphs.
 
 ```go
 w := workflow.MustNew(
-	workflow.NewStep("download", downloadJob),
+	workflow.NewStep("download", downloadJob).
+		WithTimeout(2*time.Minute).
+		WithRetry(cron.Retry(3, cron.RetryInitial(time.Second))),
 	workflow.NewStep("transform", transformJob,
 		workflow.After("download", workflow.OnSuccess)),
 	workflow.NewStep("notify_failure", notifyJob,
@@ -264,22 +310,48 @@ Conditions: `OnSuccess`, `OnFailure`, `OnSkipped`, `OnComplete` (any
 terminal state). A step is skipped when one of its dependencies didn't
 match the requested condition.
 
+`NewStepFunc` steps pass data through the DAG — each receives its
+dependencies' outputs and `Execution.Steps` reports outputs and timings:
+
+```go
+extract := workflow.NewStepFunc("extract", func(ctx context.Context, _ workflow.Inputs) (any, error) {
+	return fetchRows(ctx)
+})
+load := workflow.NewStepFunc("load", func(ctx context.Context, in workflow.Inputs) (any, error) {
+	return nil, store(ctx, in["extract"].([]Row))
+}, workflow.After("extract", workflow.OnSuccess))
+
+w := workflow.MustNew(extract, load).WithOnComplete(func(e *workflow.Execution) {
+	log.Printf("run %s took %v", e.ID, e.Duration)
+})
+```
+
 ## Quartz tokens
 
-`parserext.NewQuartzParser` accepts standard 5/6-field specs and adds
-`L` (last day of month), `N#M` (Nth weekday of month), and `NL` (last
-weekday of month).
+`parserext.NewQuartzParser` accepts standard 5/6-field specs and adds the
+Quartz day tokens:
+
+| Token  | Field | Meaning                                        |
+|--------|-------|------------------------------------------------|
+| `L`    | dom   | last day of the month                          |
+| `L-3`  | dom   | 3 days before the last day                     |
+| `LW`   | dom   | last weekday of the month                      |
+| `15W`  | dom   | weekday nearest the 15th (never crosses month) |
+| `5#3`  | dow   | third Friday (`FRI#3` also works)              |
+| `5L`   | dow   | last Friday (`FRIL` also works)                |
 
 ```go
 c := cron.New(cron.WithParser(parserext.NewQuartzParser(time.UTC)))
 
-_, _ = c.Add("0 0 18 L * ?", reportJob)    // last day of every month
-_, _ = c.Add("0 0 9 ? * 5#3", standupJob)  // third Friday
-_, _ = c.Add("0 30 22 ? * 5L", payrollJob) // last Friday
+_, _ = c.Add("0 0 18 L * ?", reportJob)      // last day of every month
+_, _ = c.Add("0 0 9 ? * FRI#3", standupJob)  // third Friday
+_, _ = c.Add("0 30 22 ? * FRIL", payrollJob) // last Friday
+_, _ = c.Add("0 0 9 15W * ?", invoiceJob)    // weekday nearest the 15th
 ```
 
 `?` is accepted in the day-of-month and day-of-week fields per the Quartz
-convention.
+convention. Numeric day-of-week stays cron-style 0-6 Sunday-first (not
+Quartz's 1-7); the name forms are unambiguous.
 
 ## Migrating from robfig/cron
 
