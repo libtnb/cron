@@ -61,19 +61,22 @@ func (r SkipReason) String() string {
 	}
 }
 
-// FireKey is the coordination key for one fire of one entry: "<name>@<unix>",
-// or "#<id>@<unix>" for unnamed entries. Including the scheduled time makes
-// every fire — including each MissedRunOnce/MissedRunAll catch-up instant —
-// its own claim, so deduplication depends on neither lock hold duration nor
-// clock agreement between instances.
+// FireKey is the coordination key for one fire of one entry:
+// "<name>@<unix-nanos>". Nanosecond precision matches the scheduler's heap,
+// so custom sub-second Schedules never collapse two legitimate fires into one
+// claim. Including the scheduled time makes every fire — including each
+// MissedRunOnce/MissedRunAll catch-up instant — its own claim, so
+// deduplication depends on neither lock hold duration nor clock agreement
+// between instances.
 //
-// The name is the cross-instance component: EntryID is process-local, so the
-// "#<id>" fallback only matches across identical binaries registering entries
-// in identical order. Under a Locker a name must uniquely identify a job;
-// entries sharing a name share claims for coinciding instants.
+// The name is the cross-instance component and is required for locked
+// entries (see ErrLockerRequiresName): it must uniquely identify a job, and
+// entries sharing a name share claims for coinciding instants. The "#<id>"
+// fallback exists only for direct callers; the scheduler never registers a
+// locked entry without a name.
 func FireKey(name string, id EntryID, scheduledAt time.Time) string {
 	if name == "" {
 		name = "#" + strconv.FormatUint(uint64(id), 10)
 	}
-	return name + "@" + strconv.FormatInt(scheduledAt.Unix(), 10)
+	return name + "@" + strconv.FormatInt(scheduledAt.UnixNano(), 10)
 }

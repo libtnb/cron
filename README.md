@@ -219,16 +219,17 @@ go get github.com/libtnb/cron/lockers/postgres   # package pglock
 ```
 
 **Locker — exactly once per fire.** Every automatic fire claims the key
-`<name>@<scheduledAt-unix>`; one instance in the fleet wins, the rest skip and
-emit `EventSkipped`. Because the key identifies the fire (not the job), dedup
-depends on neither lock hold time nor clock agreement, and catch-up fires
-(`MissedRunOnce`/`MissedRunAll`) each claim their own key. Claims expire via
-TTL (default 10m) — set it to exceed your jitter plus clock skew.
+`<name>@<scheduledAt-unixnano>`; one instance in the fleet wins, the rest skip
+and emit `EventSkipped`. Because the key identifies the fire (not the job),
+dedup depends on neither lock hold time nor clock agreement, and catch-up
+fires (`MissedRunOnce`/`MissedRunAll`) each claim their own key. Claims expire
+via TTL (default 10m) — set it to exceed your jitter plus clock skew.
 
 ```go
 client := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
 c := cron.New(cron.WithLocker(redislock.NewLocker(client)))
-// Names are the cross-instance key component: keep them unique per job.
+// Locked entries must be named (ErrLockerRequiresName otherwise): the name
+// is the cross-instance key component, so keep it unique per job.
 c.Add("0 * * * *", job, cron.WithName("hourly-report"))
 ```
 

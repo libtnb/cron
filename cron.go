@@ -446,6 +446,12 @@ func (c *Cron) add(spec string, s Schedule, j Job, opts ...EntryOption) (EntryID
 	if ec.lockerSet {
 		locker = ec.locker
 	}
+	if locker != nil && ec.name == "" {
+		// The name is the cross-instance component of FireKey; the EntryID
+		// fallback is process-local and silently breaks exactly-once during
+		// rolling deploys, so refuse instead of degrading.
+		return 0, ErrLockerRequiresName
+	}
 	anchor := ec.lastRun
 	if anchor.IsZero() {
 		anchor = time.Now()
@@ -453,12 +459,6 @@ func (c *Cron) add(spec string, s Schedule, j Job, opts ...EntryOption) (EntryID
 	next := s.Next(anchor)
 
 	id := EntryID(c.nextID.Add(1))
-	if locker != nil && ec.name == "" {
-		// FireKey falls back to the process-local EntryID, which only matches
-		// across identical binaries registering entries in identical order.
-		c.cfg.logger.Warn("cron: distributed locker on unnamed entry; use WithName for cross-instance fire keys",
-			slog.Uint64("id", uint64(id)))
-	}
 	e := &entry{
 		id:       id,
 		name:     ec.name,

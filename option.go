@@ -120,7 +120,10 @@ func WithMissedTolerance(d time.Duration) Option {
 	return func(c *config) { c.missedTolerance = d }
 }
 
-// WithMaxConcurrent caps in-flight jobs. Zero means unlimited.
+// WithMaxConcurrent caps in-flight invocations. Zero means unlimited. A slot
+// is held for the invocation's whole lifetime — jitter wait and distributed
+// coordination included — and is released immediately when coordination skips
+// the fire.
 func WithMaxConcurrent(n int) Option {
 	return func(c *config) { c.maxConcurrent = n }
 }

@@ -339,24 +339,31 @@ func TestCatchUpFiresClaimDistinctKeys(t *testing.T) {
 	}
 }
 
-func TestUnnamedEntryWithLockerWarns(t *testing.T) {
-	logger := slog.New(slog.DiscardHandler)
-	c := cron.New(cron.WithLocation(time.UTC), cron.WithLocker(cron.NewMemoryLocker()), cron.WithLogger(logger))
-	if _, err := c.Add("@every 1m", cron.JobFunc(noop)); err != nil { // warn branch
+func TestUnnamedEntryWithLockerRejected(t *testing.T) {
+	c := cron.New(cron.WithLocation(time.UTC), cron.WithLocker(cron.NewMemoryLocker()))
+	if _, err := c.Add("@every 1m", cron.JobFunc(noop)); !errors.Is(err, cron.ErrLockerRequiresName) {
+		t.Fatalf("unnamed locked entry = %v, want ErrLockerRequiresName", err)
+	}
+	if _, err := c.Add("@every 1m", cron.JobFunc(noop), cron.WithName("named")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Add("@every 1m", cron.JobFunc(noop), cron.WithName("named")); err != nil { // no-warn branch
+	// Opting the entry out of the locker lifts the name requirement.
+	if _, err := c.Add("@every 1m", cron.JobFunc(noop), cron.WithEntryLocker(nil)); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestFireKey(t *testing.T) {
 	at := time.Unix(1750000000, 0)
-	if got := cron.FireKey("job", 7, at); got != "job@1750000000" {
+	if got := cron.FireKey("job", 7, at); got != "job@1750000000000000000" {
 		t.Fatalf("named: %q", got)
 	}
-	if got := cron.FireKey("", 7, at); got != "#7@1750000000" {
+	if got := cron.FireKey("", 7, at); got != "#7@1750000000000000000" {
 		t.Fatalf("fallback: %q", got)
+	}
+	// Nanosecond precision: sub-second fires must claim distinct keys.
+	if cron.FireKey("job", 7, at) == cron.FireKey("job", 7, at.Add(100*time.Millisecond)) {
+		t.Fatal("fires within the same second must not share a key")
 	}
 }
 

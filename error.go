@@ -19,6 +19,7 @@ var (
 	ErrJobPanic            = errors.New("cron: job panicked")
 	ErrLockHeld            = errors.New("cron: fire lock held by another instance")
 	ErrNotLeader           = errors.New("cron: not leader")
+	ErrLockerRequiresName  = errors.New("cron: distributed locker requires WithName")
 )
 
 // ParseError describes a failure parsing a cron specification.
