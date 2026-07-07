@@ -55,6 +55,30 @@ func TestTriggeredSchedule_String(t *testing.T) {
 	}
 }
 
+func TestAlignedDelay(t *testing.T) {
+	d := AlignedDelay(5 * time.Minute)
+
+	// Epoch alignment: staggered observers converge on the same instant.
+	a := d.Next(t0(2026, 1, 1, 12, 0, 3))
+	b := d.Next(t0(2026, 1, 1, 12, 1, 17))
+	want := t0(2026, 1, 1, 12, 5, 0)
+	if !a.Equal(want) || !b.Equal(want) {
+		t.Fatalf("staggered nexts = %v / %v, want both %v", a, b, want)
+	}
+
+	// Strictly after, even from an exact boundary.
+	if got := d.Next(want); !got.Equal(t0(2026, 1, 1, 12, 10, 0)) {
+		t.Fatalf("from boundary: got %v", got)
+	}
+
+	if got := AlignedDelay(0).Next(time.Now()); !got.IsZero() {
+		t.Fatalf("non-positive interval: got %v", got)
+	}
+	if got := AlignedDelay(time.Minute).String(); got != "@aligned 1m0s" {
+		t.Fatalf("String = %q", got)
+	}
+}
+
 func TestOnceAt(t *testing.T) {
 	at := t0(2026, 6, 1, 12, 0, 0)
 	s := OnceAt(at)

@@ -120,7 +120,7 @@ func TestLocker_AcquiredRunsAndReleasesOnce(t *testing.T) {
 		f := &fakeLocker{}
 		c := cron.New(cron.WithLocation(time.UTC), cron.WithLocker(f))
 		var runs atomic.Int64
-		_, _ = c.Add("@every 1s", cron.JobFunc(func(context.Context) error {
+		_, _ = c.AddSchedule(cron.AlignedDelay(time.Second), cron.JobFunc(func(context.Context) error {
 			runs.Add(1)
 			return nil
 		}), cron.WithName("job"))
@@ -144,7 +144,7 @@ func TestLocker_HeldSkips(t *testing.T) {
 		h := &skipCounterHook{}
 		c := cron.New(cron.WithLocation(time.UTC), cron.WithLocker(l), cron.WithHooks(h))
 		var runs atomic.Int64
-		_, _ = c.Add("@every 1s", cron.JobFunc(func(context.Context) error {
+		_, _ = c.AddSchedule(cron.AlignedDelay(time.Second), cron.JobFunc(func(context.Context) error {
 			runs.Add(1)
 			return nil
 		}), cron.WithName("dup"))
@@ -177,7 +177,7 @@ func TestLocker_BackendErrorFailsClosed(t *testing.T) {
 		h := &skipCounterHook{}
 		c := cron.New(cron.WithLocation(time.UTC), cron.WithLocker(f), cron.WithHooks(h))
 		var runs atomic.Int64
-		_, _ = c.Add("@every 1s", cron.JobFunc(func(context.Context) error {
+		_, _ = c.AddSchedule(cron.AlignedDelay(time.Second), cron.JobFunc(func(context.Context) error {
 			runs.Add(1)
 			return nil
 		}), cron.WithName("job"))
@@ -201,7 +201,7 @@ func TestLocker_ReleaseErrorIsLogged(t *testing.T) {
 		logger := slog.New(slog.DiscardHandler)
 		c := cron.New(cron.WithLocation(time.UTC), cron.WithLocker(f), cron.WithLogger(logger))
 		var runs atomic.Int64
-		_, _ = c.Add("@every 1s", cron.JobFunc(func(context.Context) error {
+		_, _ = c.AddSchedule(cron.AlignedDelay(time.Second), cron.JobFunc(func(context.Context) error {
 			runs.Add(1)
 			return nil
 		}), cron.WithName("job"))
@@ -240,7 +240,7 @@ func TestEntryLockerOverride(t *testing.T) {
 		// (a) global failing locker, entry opts out with nil.
 		c := cron.New(cron.WithLocation(time.UTC), cron.WithLocker(failing))
 		var optOutRuns atomic.Int64
-		_, _ = c.Add("@every 1s", cron.JobFunc(func(context.Context) error {
+		_, _ = c.AddSchedule(cron.AlignedDelay(time.Second), cron.JobFunc(func(context.Context) error {
 			optOutRuns.Add(1)
 			return nil
 		}), cron.WithName("opt-out"), cron.WithEntryLocker(nil))
@@ -248,7 +248,7 @@ func TestEntryLockerOverride(t *testing.T) {
 		// (b) no global, entry brings its own failing locker.
 		c2 := cron.New(cron.WithLocation(time.UTC))
 		var ownRuns atomic.Int64
-		_, _ = c2.Add("@every 1s", cron.JobFunc(func(context.Context) error {
+		_, _ = c2.AddSchedule(cron.AlignedDelay(time.Second), cron.JobFunc(func(context.Context) error {
 			ownRuns.Add(1)
 			return nil
 		}), cron.WithName("own"), cron.WithEntryLocker(failing))
@@ -282,8 +282,10 @@ func TestExactlyOnceAcrossTwoInstances(t *testing.T) {
 
 		a := cron.New(cron.WithLocation(time.UTC), cron.WithLocker(shared), cron.WithHooks(h1))
 		b := cron.New(cron.WithLocation(time.UTC), cron.WithLocker(shared), cron.WithHooks(h2))
-		_, _ = a.Add("@every 1s", job, cron.WithName("shared-job"))
-		_, _ = b.Add("@every 1s", job, cron.WithName("shared-job"))
+		// AlignedDelay: both instances compute identical fire instants even if
+		// they had registered at different times.
+		_, _ = a.AddSchedule(cron.AlignedDelay(time.Second), job, cron.WithName("shared-job"))
+		_, _ = b.AddSchedule(cron.AlignedDelay(time.Second), job, cron.WithName("shared-job"))
 
 		_ = a.Start()
 		_ = b.Start()
@@ -336,6 +338,17 @@ func TestCatchUpFiresClaimDistinctKeys(t *testing.T) {
 	}
 	if int64(len(keys)) < runs.Load() {
 		t.Fatalf("keys=%d runs=%d", len(keys), runs.Load())
+	}
+}
+
+func TestConstantDelayWithLockerWarns(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	c := cron.New(cron.WithLocation(time.UTC), cron.WithLocker(cron.NewMemoryLocker()), cron.WithLogger(logger))
+	if _, err := c.Add("@every 1m", cron.JobFunc(noop), cron.WithName("warned")); err != nil { // warn branch
+		t.Fatal(err)
+	}
+	if _, err := c.AddSchedule(cron.AlignedDelay(time.Minute), cron.JobFunc(noop), cron.WithName("clean")); err != nil { // no-warn branch
+		t.Fatal(err)
 	}
 }
 

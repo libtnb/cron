@@ -42,6 +42,25 @@ func (d ConstantDelay) String() string {
 	return "@every " + time.Duration(d).String()
 }
 
+// AlignedDelay is a fixed-interval Schedule aligned to the Unix epoch: every
+// instance computes identical fire instants, which makes it the right
+// interval schedule under a distributed Locker. ConstantDelay, by contrast,
+// anchors its phase at Add time, so staggered instances never share fire
+// keys. Non-positive intervals never fire.
+type AlignedDelay time.Duration
+
+func (d AlignedDelay) Next(now time.Time) time.Time {
+	step := time.Duration(d)
+	if step <= 0 {
+		return time.Time{}
+	}
+	return now.Truncate(step).Add(step)
+}
+
+func (d AlignedDelay) String() string {
+	return "@aligned " + time.Duration(d).String()
+}
+
 type triggeredSchedule struct{}
 
 // TriggeredSchedule never fires automatically. Combine with Trigger.

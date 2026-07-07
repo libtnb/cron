@@ -27,6 +27,12 @@ type ReleaseFunc func(ctx context.Context) error
 // fire-scoped keys close (an instance with a larger jitter draw could still
 // attempt the same fire). The TTL must exceed max jitter + clock skew + any
 // catch-up horizon within which the same instant may be re-attempted.
+//
+// Exactly-once holds only when every instance computes identical fire
+// instants: cron expressions, OnceAt, and AlignedDelay do; ConstantDelay
+// anchors its phase at Add time, so staggered instances claim different keys
+// and each runs. Upgrading across a fire-key format change (v0.4 -> v0.5
+// moved to nanoseconds) requires restarting all instances together.
 type Locker interface {
 	Lock(ctx context.Context, key string) (ReleaseFunc, error)
 }

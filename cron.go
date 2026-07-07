@@ -446,11 +446,19 @@ func (c *Cron) add(spec string, s Schedule, j Job, opts ...EntryOption) (EntryID
 	if ec.lockerSet {
 		locker = ec.locker
 	}
-	if locker != nil && ec.name == "" {
-		// The name is the cross-instance component of FireKey; the EntryID
-		// fallback is process-local and silently breaks exactly-once during
-		// rolling deploys, so refuse instead of degrading.
-		return 0, ErrLockerRequiresName
+	if locker != nil {
+		if ec.name == "" {
+			// The name is the cross-instance component of FireKey; the EntryID
+			// fallback is process-local and silently breaks exactly-once during
+			// rolling deploys, so refuse instead of degrading.
+			return 0, ErrLockerRequiresName
+		}
+		if _, ok := s.(ConstantDelay); ok {
+			// Not rejected: identical replicas registering together do share
+			// keys. But any stagger desynchronizes the phases for good.
+			c.cfg.logger.Warn("cron: ConstantDelay phase is process-local; staggered instances will not share fire keys — use AlignedDelay or a cron expression under a Locker",
+				slog.String("name", ec.name))
+		}
 	}
 	anchor := ec.lastRun
 	if anchor.IsZero() {
