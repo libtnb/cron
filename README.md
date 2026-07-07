@@ -238,7 +238,8 @@ c := cron.New(cron.WithElector(redislock.NewElector(client)))
 ```
 
 Postgres works through `database/sql` with any driver; create the tables once
-with `pglock.Migrate(ctx, db)`.
+with `pglock.Migrate(ctx, db)`. Table names are customizable via
+`pglock.MigrateTables` plus `WithLocksTable`/`WithLeaderTable`.
 
 - Override per entry with `WithEntryLocker(l)`; `WithEntryLocker(nil)` opts an
   entry out of the global locker.

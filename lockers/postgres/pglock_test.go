@@ -116,6 +116,50 @@ func TestElector_AcquireRenewBlockAndFailover(t *testing.T) {
 	}
 }
 
+func TestCustomTables(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	if err := pglock.MigrateTables(ctx, db, "myapp_locks", "myapp_leader"); err != nil {
+		t.Fatal(err)
+	}
+	l := pglock.NewLocker(db, pglock.WithLocksTable("myapp_locks"))
+	key := "custom@" + t.Name()
+	if _, err := l.Lock(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Lock(ctx, key); !errors.Is(err, cron.ErrLockHeld) {
+		t.Fatalf("second acquire = %v, want ErrLockHeld", err)
+	}
+	if err := l.Cleanup(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	e := pglock.NewElector(db,
+		pglock.WithLeaderTable("myapp_leader"),
+		pglock.WithLeaderName("custom-"+t.Name()))
+	if err := e.IsLeader(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInvalidTableNames(t *testing.T) {
+	if err := pglock.MigrateTables(context.Background(), nil, "bad name; drop", "ok_table"); err == nil {
+		t.Fatal("MigrateTables must reject invalid identifiers")
+	}
+	mustPanic := func(name string, f func()) {
+		t.Helper()
+		defer func() {
+			if recover() == nil {
+				t.Fatalf("%s: expected panic", name)
+			}
+		}()
+		f()
+	}
+	mustPanic("WithLocksTable", func() { pglock.NewLocker(nil, pglock.WithLocksTable(`x";--`)) })
+	mustPanic("WithLeaderTable", func() { pglock.NewElector(nil, pglock.WithLeaderTable("1bad")) })
+}
+
 func TestLocker_BackendError(t *testing.T) {
 	dsn := os.Getenv("CRON_PG_TEST_DSN")
 	if dsn == "" {
