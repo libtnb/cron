@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"context"
 	"log/slog"
 	"strconv"
 	"time"
@@ -25,6 +26,23 @@ type Entry struct {
 
 // Valid reports whether e refers to a registered entry. Zero is invalid.
 func (e Entry) Valid() bool { return e.ID != 0 }
+
+// EntryInfo identifies the running invocation inside a job's context.
+type EntryInfo struct {
+	ID          EntryID
+	Name        string
+	ScheduledAt time.Time
+}
+
+type entryInfoKey struct{}
+
+// EntryInfoFromContext returns the identity of the entry whose job is running
+// under ctx. The scheduler injects it for every dispatch, so wrappers and
+// jobs can tell which entry — and which fire — they serve.
+func EntryInfoFromContext(ctx context.Context) (EntryInfo, bool) {
+	info, ok := ctx.Value(entryInfoKey{}).(EntryInfo)
+	return info, ok
+}
 
 func (e Entry) LogValue() slog.Value {
 	attrs := []slog.Attr{slog.String("id", e.ID.String())}

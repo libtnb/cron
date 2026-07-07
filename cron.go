@@ -813,6 +813,9 @@ func (c *Cron) dispatch(parent context.Context, e *entry, scheduledAt time.Time,
 			jobCtx, cancel = context.WithTimeoutCause(parent, e.timeout, ErrJobTimeout)
 			defer cancel()
 		}
+		jobCtx = context.WithValue(jobCtx, entryInfoKey{}, EntryInfo{
+			ID: e.id, Name: e.name, ScheduledAt: scheduledAt,
+		})
 
 		fireAt := time.Now()
 		recordJobStarted(c.cfg.recorder, e.name)

@@ -43,6 +43,33 @@ func TestEntry_ValidAndLogValue(t *testing.T) {
 	}
 }
 
+func TestEntryInfoFromContext(t *testing.T) {
+	if _, ok := cron.EntryInfoFromContext(context.Background()); ok {
+		t.Fatal("plain context must carry no EntryInfo")
+	}
+
+	c := cron.New(cron.WithLocation(time.UTC))
+	got := make(chan cron.EntryInfo, 1)
+	id, _ := c.AddSchedule(cron.TriggeredSchedule(), cron.JobFunc(func(ctx context.Context) error {
+		info, ok := cron.EntryInfoFromContext(ctx)
+		if !ok {
+			t.Error("job context must carry EntryInfo")
+		}
+		got <- info
+		return nil
+	}), cron.WithName("who-am-i"))
+	_ = c.Start()
+	defer func() { _ = c.Stop(context.Background()) }()
+
+	if err := c.TriggerAndWait(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	info := <-got
+	if info.ID != id || info.Name != "who-am-i" || info.ScheduledAt.IsZero() {
+		t.Fatalf("EntryInfo = %+v", info)
+	}
+}
+
 func TestEntries_OrderedWithMixedNext(t *testing.T) {
 	c := cron.New()
 	idA, _ := c.Add("@every 1m", cron.JobFunc(func(ctx context.Context) error { return nil }), cron.WithName("A"))
