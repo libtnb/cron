@@ -22,8 +22,8 @@ github.com/gomodule/redigo v1.9.3 h1:dNPSXeXv6HCq2jdyWfjgmhBdqnR6PRO3m/G05nvpPC8
 github.com/gomodule/redigo v1.9.3/go.mod h1:KsU3hiK/Ay8U42qpaJk+kuNa3C+spxapWpM+ywhcgtw=
 github.com/klauspost/cpuid/v2 v2.2.10 h1:tBs3QSyvjDyFTq3uoc/9xFpCuOsJQFNPiAhYdw2skhE=
 github.com/klauspost/cpuid/v2 v2.2.10/go.mod h1:hqwkgyIinND0mEev00jJYCxPNVRVXFQeu1XKlok6oO0=
-github.com/libtnb/cron v0.3.0 h1:LG3PrDcyTYef7r35ZxF0vCMLCy4BNJKVwvDXnLHv6Gg=
-github.com/libtnb/cron v0.3.0/go.mod h1:nrOHxS4Ernkn1E//vs64xzC58hGfoL0+lYSW2zsROGI=
+github.com/libtnb/cron v0.5.2 h1:Yy9a/S82bAS4KzE1SSMjNLtigPkejgMPUp9BHGeb1pw=
+github.com/libtnb/cron v0.5.2/go.mod h1:nrOHxS4Ernkn1E//vs64xzC58hGfoL0+lYSW2zsROGI=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/redis/go-redis/v9 v9.21.0 h1:FPBE4hhbAke+TLmcY3WkpbDffJEomdqPn3HYiqAtL9E=
