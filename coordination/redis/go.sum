@@ -10,8 +10,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/klauspost/cpuid/v2 v2.2.10 h1:tBs3QSyvjDyFTq3uoc/9xFpCuOsJQFNPiAhYdw2skhE=
 github.com/klauspost/cpuid/v2 v2.2.10/go.mod h1:hqwkgyIinND0mEev00jJYCxPNVRVXFQeu1XKlok6oO0=
-github.com/libtnb/cron v0.5.2 h1:Yy9a/S82bAS4KzE1SSMjNLtigPkejgMPUp9BHGeb1pw=
-github.com/libtnb/cron v0.5.2/go.mod h1:nrOHxS4Ernkn1E//vs64xzC58hGfoL0+lYSW2zsROGI=
+github.com/libtnb/cron v0.5.3 h1:vPKmVGyVkmsAXhpYsA6muFqFjDqpo9FqHAyXgda9o20=
+github.com/libtnb/cron v0.5.3/go.mod h1:aWexGn7W0MK3qqcuB1XnL4pm7b2BbYl807EiGZGzCzk=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/redis/go-redis/v9 v9.22.0 h1:laDvpYXTJtZLloinw1fA5Kqd6HAEH2XKxOkG/PDq2F0=

@@ -4,7 +4,7 @@ go 1.27rc2
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
-	github.com/libtnb/cron v0.5.2
+	github.com/libtnb/cron v0.5.3
 	github.com/redis/go-redis/v9 v9.22.0
 )
 
