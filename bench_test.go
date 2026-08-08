@@ -45,7 +45,7 @@ func BenchmarkParser_Parse_Descriptor(b *testing.B) {
 }
 
 func BenchmarkAdd_Throughput(b *testing.B) {
-	c := New(WithLocation(time.UTC))
+	c := MustNew(WithLocation(time.UTC))
 	for b.Loop() {
 		_, _ = c.Add("@every 1m", noopJob{})
 	}
@@ -54,7 +54,7 @@ func BenchmarkAdd_Throughput(b *testing.B) {
 func BenchmarkAdd_AtSize(b *testing.B) {
 	for _, n := range []int{10, 100, 1000} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
-			c := New(WithLocation(time.UTC))
+			c := MustNew(WithLocation(time.UTC))
 			for range n {
 				_, _ = c.Add("@every 1m", noopJob{})
 			}
@@ -68,7 +68,7 @@ func BenchmarkAdd_AtSize(b *testing.B) {
 }
 
 func BenchmarkSnapshotLookup(b *testing.B) {
-	c := New(WithLocation(time.UTC))
+	c := MustNew(WithLocation(time.UTC))
 	id, err := c.Add("@every 1m", noopJob{})
 	if err != nil {
 		b.Fatal(err)

@@ -11,7 +11,7 @@ import (
 )
 
 func TestPauseResume(t *testing.T) {
-	c := cron.New(cron.WithLocation(time.UTC))
+	c := cron.MustNew(cron.WithLocation(time.UTC))
 	id, _ := c.Add("@every 1m", cron.JobFunc(noop))
 
 	if c.Pause(cron.EntryID(999)) {
@@ -44,7 +44,7 @@ func TestPauseResume(t *testing.T) {
 }
 
 func TestTrigger_PausedEntryStillFires(t *testing.T) {
-	c := cron.New(cron.WithLocation(time.UTC))
+	c := cron.MustNew(cron.WithLocation(time.UTC))
 	ran := make(chan struct{}, 1)
 	id, _ := c.AddSchedule(cron.TriggeredSchedule(), cron.JobFunc(func(context.Context) error {
 		ran <- struct{}{}
@@ -65,7 +65,7 @@ func TestTrigger_PausedEntryStillFires(t *testing.T) {
 }
 
 func TestUpdate(t *testing.T) {
-	c := cron.New(cron.WithLocation(time.UTC))
+	c := cron.MustNew(cron.WithLocation(time.UTC))
 	id, _ := c.Add("0 0 1 1 *", cron.JobFunc(noop))
 
 	if err := c.Update(cron.EntryID(999), "* * * * *"); !errors.Is(err, cron.ErrEntryNotFound) {
@@ -89,11 +89,15 @@ func TestUpdate(t *testing.T) {
 }
 
 func TestUpdateSchedule(t *testing.T) {
-	c := cron.New(cron.WithLocation(time.UTC))
+	c := cron.MustNew(cron.WithLocation(time.UTC))
 	id, _ := c.Add("* * * * *", cron.JobFunc(noop))
 
 	if err := c.UpdateSchedule(id, nil); !errors.Is(err, cron.ErrNilSchedule) {
 		t.Fatalf("err = %v, want ErrNilSchedule", err)
+	}
+	var nilSchedule *typedNilSchedule
+	if err := c.UpdateSchedule(id, nilSchedule); !errors.Is(err, cron.ErrNilSchedule) {
+		t.Fatalf("typed-nil schedule error = %v, want ErrNilSchedule", err)
 	}
 	// Swapping to a never-firing schedule clears Next and Spec.
 	if err := c.UpdateSchedule(id, cron.TriggeredSchedule()); err != nil {
@@ -106,7 +110,7 @@ func TestUpdateSchedule(t *testing.T) {
 }
 
 func TestUpdate_PausedStaysPausedUntilResume(t *testing.T) {
-	c := cron.New(cron.WithLocation(time.UTC))
+	c := cron.MustNew(cron.WithLocation(time.UTC))
 	id, _ := c.Add("0 0 1 1 *", cron.JobFunc(noop))
 	c.Pause(id)
 
@@ -128,7 +132,7 @@ func TestUpdate_PausedStaysPausedUntilResume(t *testing.T) {
 }
 
 func TestDrain_LetsJobsFinishUncancelled(t *testing.T) {
-	c := cron.New(cron.WithLocation(time.UTC))
+	c := cron.MustNew(cron.WithLocation(time.UTC))
 	release := make(chan struct{})
 	var sawCancel, finished atomic.Bool
 	id, _ := c.AddSchedule(cron.TriggeredSchedule(), cron.JobFunc(func(ctx context.Context) error {
@@ -166,7 +170,7 @@ func TestDrain_LetsJobsFinishUncancelled(t *testing.T) {
 }
 
 func TestDrain_TimeoutThenStopCancels(t *testing.T) {
-	c := cron.New(cron.WithLocation(time.UTC))
+	c := cron.MustNew(cron.WithLocation(time.UTC))
 	id, _ := c.AddSchedule(cron.TriggeredSchedule(), cron.JobFunc(func(ctx context.Context) error {
 		<-ctx.Done()
 		return context.Cause(ctx)
@@ -188,7 +192,7 @@ func TestDrain_TimeoutThenStopCancels(t *testing.T) {
 }
 
 func TestDrain_BeforeStart(t *testing.T) {
-	c := cron.New()
+	c := cron.MustNew()
 	if err := c.Drain(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +202,7 @@ func TestDrain_BeforeStart(t *testing.T) {
 }
 
 func TestTriggerAndWait(t *testing.T) {
-	c := cron.New(cron.WithLocation(time.UTC))
+	c := cron.MustNew(cron.WithLocation(time.UTC))
 	boom := errors.New("boom")
 	id, _ := c.AddSchedule(cron.TriggeredSchedule(), cron.JobFunc(func(context.Context) error {
 		return boom
@@ -215,8 +219,31 @@ func TestTriggerAndWait(t *testing.T) {
 	}
 }
 
+func TestLifecycleRejectsNilContextWithoutChangingState(t *testing.T) {
+	c := cron.MustNew(cron.WithLocation(time.UTC))
+	id, err := c.AddSchedule(cron.TriggeredSchedule(), cron.JobFunc(noop))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.TriggerAndWait(nil, id); !errors.Is(err, cron.ErrNilContext) {
+		t.Fatalf("TriggerAndWait(nil) = %v", err)
+	}
+	if err := c.Stop(nil); !errors.Is(err, cron.ErrNilContext) {
+		t.Fatalf("Stop(nil) = %v", err)
+	}
+	if err := c.Drain(nil); !errors.Is(err, cron.ErrNilContext) {
+		t.Fatalf("Drain(nil) = %v", err)
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("nil-context calls changed lifecycle state: %v", err)
+	}
+	if err := c.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTriggerAndWait_CtxBoundsWait(t *testing.T) {
-	c := cron.New(cron.WithLocation(time.UTC))
+	c := cron.MustNew(cron.WithLocation(time.UTC))
 	release := make(chan struct{})
 	id, _ := c.AddSchedule(cron.TriggeredSchedule(), cron.JobFunc(func(context.Context) error {
 		<-release
@@ -234,7 +261,7 @@ func TestTriggerAndWait_CtxBoundsWait(t *testing.T) {
 }
 
 func TestWithLastRun_CatchUpRunOnce(t *testing.T) {
-	c := cron.New(cron.WithLocation(time.UTC), cron.WithMissedFire(cron.MissedRunOnce))
+	c := cron.MustNew(cron.WithLocation(time.UTC), cron.WithMissedFire(cron.MissedRunOnce))
 	ran := make(chan struct{}, 4)
 	last := time.Now().Add(-90 * time.Minute)
 	id, err := c.Add("0 * * * *", cron.JobFunc(func(context.Context) error {
@@ -262,7 +289,7 @@ func TestWithLastRun_CatchUpRunOnce(t *testing.T) {
 }
 
 func TestWithLastRun_CatchUpRunAllPerEntry(t *testing.T) {
-	c := cron.New(cron.WithLocation(time.UTC)) // global default stays MissedSkip
+	c := cron.MustNew(cron.WithLocation(time.UTC)) // global default stays MissedSkip
 	var runs atomic.Int64
 	last := time.Now().Add(-3*time.Hour - time.Minute)
 	_, err := c.Add("0 * * * *", cron.JobFunc(func(context.Context) error {
@@ -287,7 +314,7 @@ func TestWithLastRun_CatchUpRunAllPerEntry(t *testing.T) {
 func TestWithEntryJitter_OverridesGlobal(t *testing.T) {
 	// Global jitter is huge; the per-entry zero must win or the fire cannot
 	// happen within the test window.
-	c := cron.New(cron.WithLocation(time.UTC), cron.WithJitter(time.Hour))
+	c := cron.MustNew(cron.WithLocation(time.UTC), cron.WithJitter(time.Hour))
 	ran := make(chan struct{}, 1)
 	_, _ = c.AddSchedule(cron.ConstantDelay(time.Second), cron.JobFunc(func(context.Context) error {
 		select {
@@ -306,29 +333,32 @@ func TestWithEntryJitter_OverridesGlobal(t *testing.T) {
 	}
 }
 
-func TestStopDuringJitterEmitsMissed(t *testing.T) {
-	h := &missedCounterHook{}
-	c := cron.New(cron.WithLocation(time.UTC), cron.WithJitter(time.Hour), cron.WithHooks(h))
+func TestStopDuringJitterEmitsCanceled(t *testing.T) {
+	o := &canceledCounterObserver{}
+	c := cron.MustNew(cron.WithLocation(time.UTC), cron.WithJitter(time.Hour), cron.WithObservers(o))
 	_, _ = c.AddSchedule(cron.ConstantDelay(time.Second), cron.JobFunc(noop))
 	_ = c.Start()
 	time.Sleep(1200 * time.Millisecond) // the first fire is now inside its jitter wait
 	if err := c.Stop(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if h.missed.Load() == 0 {
-		t.Fatal("a fire abandoned during jitter must emit EventMissed")
+	if o.canceled.Load() == 0 {
+		t.Fatal("a fire abandoned during jitter must emit CanceledFireEvent")
 	}
 }
 
-type missedCounterHook struct{ missed atomic.Int64 }
+type canceledCounterObserver struct{ canceled atomic.Int64 }
 
-func (h *missedCounterHook) OnMissedFire(cron.EventMissed) { h.missed.Add(1) }
+func (o *canceledCounterObserver) Observe(event cron.Event) {
+	if _, ok := event.(cron.CanceledFireEvent); ok {
+		o.canceled.Add(1)
+	}
+}
 
 func TestWithBaseContext(t *testing.T) {
 	type ctxKey struct{}
 	base, cancel := context.WithCancel(context.WithValue(context.Background(), ctxKey{}, "v"))
-	defer cancel()
-	c := cron.New(cron.WithLocation(time.UTC), cron.WithBaseContext(base))
+	c := cron.MustNew(cron.WithLocation(time.UTC), cron.WithBaseContext(base))
 	got := make(chan string, 1)
 	id, _ := c.AddSchedule(cron.TriggeredSchedule(), cron.JobFunc(func(ctx context.Context) error {
 		v, _ := ctx.Value(ctxKey{}).(string)
@@ -344,10 +374,22 @@ func TestWithBaseContext(t *testing.T) {
 	if v := <-got; v != "v" {
 		t.Fatalf("job ctx value = %q, want %q", v, "v")
 	}
+
+	cancel()
+	deadline := time.Now().Add(time.Second)
+	for c.Running() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if c.Running() {
+		t.Fatal("Running remained true after the base context was canceled")
+	}
+	if err := c.Trigger(id); !errors.Is(err, cron.ErrSchedulerNotRunning) {
+		t.Fatalf("Trigger after base cancellation = %v, want ErrSchedulerNotRunning", err)
+	}
 }
 
 func TestJobPanicRecoveredByDefault(t *testing.T) {
-	c := cron.New(cron.WithLocation(time.UTC))
+	c := cron.MustNew(cron.WithLocation(time.UTC))
 	id, _ := c.AddSchedule(cron.TriggeredSchedule(), cron.JobFunc(func(context.Context) error {
 		panic("kaboom")
 	}))
@@ -361,7 +403,7 @@ func TestJobPanicRecoveredByDefault(t *testing.T) {
 }
 
 func TestWithoutRecover_NormalJobsUnaffected(t *testing.T) {
-	c := cron.New(cron.WithLocation(time.UTC), cron.WithoutRecover())
+	c := cron.MustNew(cron.WithLocation(time.UTC), cron.WithoutRecover())
 	id, _ := c.AddSchedule(cron.TriggeredSchedule(), cron.JobFunc(noop))
 	_ = c.Start()
 	defer func() { _ = c.Stop(context.Background()) }()

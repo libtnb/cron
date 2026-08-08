@@ -3,7 +3,7 @@ package cron
 import "time"
 
 // MissedFirePolicy controls behaviour when a fire is later than
-// WithMissedTolerance. OnMissedFire fires regardless of policy.
+// WithMissedTolerance. MissedFireEvent is published regardless of policy.
 type MissedFirePolicy uint8
 
 const (
@@ -37,4 +37,8 @@ func (p MissedFirePolicy) String() string {
 	default:
 		return "unknown"
 	}
+}
+
+func (p MissedFirePolicy) valid() bool {
+	return p >= MissedSkip && p <= MissedRunAll
 }

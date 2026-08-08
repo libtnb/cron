@@ -48,7 +48,7 @@ func TestEntryInfoFromContext(t *testing.T) {
 		t.Fatal("plain context must carry no EntryInfo")
 	}
 
-	c := cron.New(cron.WithLocation(time.UTC))
+	c := cron.MustNew(cron.WithLocation(time.UTC))
 	got := make(chan cron.EntryInfo, 1)
 	id, _ := c.AddSchedule(cron.TriggeredSchedule(), cron.JobFunc(func(ctx context.Context) error {
 		info, ok := cron.EntryInfoFromContext(ctx)
@@ -71,7 +71,7 @@ func TestEntryInfoFromContext(t *testing.T) {
 }
 
 func TestEntries_OrderedWithMixedNext(t *testing.T) {
-	c := cron.New()
+	c := cron.MustNew()
 	idA, _ := c.Add("@every 1m", cron.JobFunc(func(ctx context.Context) error { return nil }), cron.WithName("A"))
 	_, _ = c.AddSchedule(cron.TriggeredSchedule(),
 		cron.JobFunc(func(ctx context.Context) error { return nil }), cron.WithName("Z-zero-next"))
@@ -92,7 +92,7 @@ func TestEntries_OrderedWithMixedNext(t *testing.T) {
 }
 
 func TestEntries_BothZeroNextStableOrder(t *testing.T) {
-	c := cron.New()
+	c := cron.MustNew()
 	_, _ = c.AddSchedule(cron.TriggeredSchedule(),
 		cron.JobFunc(func(ctx context.Context) error { return nil }), cron.WithName("a"))
 	_, _ = c.AddSchedule(cron.TriggeredSchedule(),
@@ -107,7 +107,7 @@ func TestEntries_BothZeroNextStableOrder(t *testing.T) {
 }
 
 func TestEntries_EarlyBreakStopsIteration(t *testing.T) {
-	c := cron.New()
+	c := cron.MustNew()
 	for i := range 5 {
 		_, _ = c.Add("@every 1m", cron.JobFunc(func(ctx context.Context) error { return nil }),
 			cron.WithName(string(rune('a'+i))))

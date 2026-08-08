@@ -34,7 +34,7 @@ func TestCron_FireDueComputesNextOutsideMu(t *testing.T) {
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	c := New(WithLocation(time.UTC), WithMissedTolerance(time.Hour))
+	c := MustNew(WithLocation(time.UTC), WithMissedTolerance(time.Hour))
 	id, err := c.AddSchedule(s, JobFunc(func(context.Context) error {
 		t.Fatal("job should not run after Remove")
 		return nil
@@ -126,7 +126,7 @@ func TestFindMostRecentMissed_ZeroNextStopsLoop(t *testing.T) {
 }
 
 func TestAdvancePrev_NoOpWhenEntryRemoved(t *testing.T) {
-	c := New(WithLocation(time.UTC))
+	c := MustNew(WithLocation(time.UTC))
 	id, _ := c.AddSchedule(ConstantDelay(time.Minute), JobFunc(func(context.Context) error { return nil }))
 	c.Remove(id)
 	// Should not panic and should not republish a view for a removed entry.
@@ -137,7 +137,7 @@ func TestAdvancePrev_NoOpWhenEntryRemoved(t *testing.T) {
 }
 
 func TestAdvancePrev_NoOpWhenFireAtNotAfterPrev(t *testing.T) {
-	c := New(WithLocation(time.UTC))
+	c := MustNew(WithLocation(time.UTC))
 	id, _ := c.AddSchedule(ConstantDelay(time.Minute), JobFunc(func(context.Context) error { return nil }))
 	now := time.Now()
 	c.advancePrev(id, now)
@@ -159,7 +159,7 @@ func TestStop_CtxCancelDuringLoopShutdown(t *testing.T) {
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	c := New(WithLocation(time.UTC), WithMissedTolerance(time.Hour))
+	c := MustNew(WithLocation(time.UTC), WithMissedTolerance(time.Hour))
 	_, err := c.AddSchedule(s, JobFunc(func(context.Context) error { return nil }))
 	if err != nil {
 		t.Fatal(err)
@@ -179,7 +179,7 @@ func TestStop_CtxCancelDuringLoopShutdown(t *testing.T) {
 }
 
 func TestCron_AddScheduleComputesNextOutsideMu(t *testing.T) {
-	c := New(WithLocation(time.UTC))
+	c := MustNew(WithLocation(time.UTC))
 	id, err := c.AddSchedule(ConstantDelay(time.Hour), JobFunc(func(context.Context) error {
 		return nil
 	}))
@@ -256,7 +256,7 @@ func TestFindAllMissed_CapKeepsNewest(t *testing.T) {
 }
 
 func TestMakeFirePlan_Policies(t *testing.T) {
-	c := New(WithLocation(time.UTC), WithMissedTolerance(time.Second))
+	c := MustNew(WithLocation(time.UTC), WithMissedTolerance(time.Second))
 	now := time.Now()
 	sched := ConstantDelay(time.Minute)
 
@@ -290,7 +290,7 @@ func TestMakeFirePlan_Policies(t *testing.T) {
 }
 
 func TestCommitAndDispatch_StaleGenDiscarded(t *testing.T) {
-	c := New(WithLocation(time.UTC))
+	c := MustNew(WithLocation(time.UTC))
 	var runs atomic.Int32
 	id, _ := c.AddSchedule(ConstantDelay(time.Hour), JobFunc(func(context.Context) error {
 		runs.Add(1)
@@ -327,7 +327,7 @@ func (g *gateSchedule) Next(now time.Time) time.Time {
 }
 
 func TestResume_LosesRaceToConcurrentUpdate(t *testing.T) {
-	c := New(WithLocation(time.UTC))
+	c := MustNew(WithLocation(time.UTC))
 	g := &gateSchedule{entered: make(chan struct{}), release: make(chan struct{})}
 	id, _ := c.AddSchedule(g, JobFunc(func(context.Context) error { return nil })) // Next call #1
 	c.Pause(id)
@@ -375,7 +375,7 @@ func TestCompareNext(t *testing.T) {
 }
 
 func TestResume_EntryRemovedDuringNext(t *testing.T) {
-	c := New(WithLocation(time.UTC))
+	c := MustNew(WithLocation(time.UTC))
 	g := &gateSchedule{entered: make(chan struct{}), release: make(chan struct{})}
 	id, _ := c.AddSchedule(g, JobFunc(func(context.Context) error { return nil })) // Next call #1
 	c.Pause(id)

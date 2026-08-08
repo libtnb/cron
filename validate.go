@@ -19,35 +19,45 @@ type SpecAnalysis struct {
 	NextRun     time.Time      // upcoming firing relative to the now passed in
 }
 
-// ValidateSpec returns nil iff spec parses with the standard parser.
+// ValidateSpec checks spec with the standard parser.
 func ValidateSpec(spec string) error {
 	return ValidateSpecWith(spec, defaultParser)
 }
 
-// ValidateSpecWith is ValidateSpec with a custom parser.
+// ValidateSpecWith checks spec with p.
 func ValidateSpecWith(spec string, p Parser) error {
-	if p == nil {
+	if isNilLike(p) {
 		return errors.New("cron: nil parser")
 	}
-	_, err := p.Parse(spec)
-	return err
+	s, err := p.Parse(spec)
+	if err != nil {
+		return err
+	}
+	if isNilLike(s) {
+		return ErrNilSchedule
+	}
+	return nil
 }
 
-// AnalyzeSpec parses spec and returns a structured description.
+// AnalyzeSpec describes spec relative to now using the standard parser.
 func AnalyzeSpec(spec string, now time.Time) SpecAnalysis {
 	return AnalyzeSpecWith(spec, defaultParser, now)
 }
 
-// AnalyzeSpecWith is AnalyzeSpec with a custom parser.
+// AnalyzeSpecWith describes spec relative to now using p.
 func AnalyzeSpecWith(spec string, p Parser, now time.Time) SpecAnalysis {
 	res := SpecAnalysis{Spec: spec}
-	if p == nil {
+	if isNilLike(p) {
 		res.Err = errors.New("cron: nil parser")
 		return res
 	}
 	s, err := p.Parse(spec)
 	if err != nil {
 		res.Err = err
+		return res
+	}
+	if isNilLike(s) {
+		res.Err = ErrNilSchedule
 		return res
 	}
 	res.Valid = true

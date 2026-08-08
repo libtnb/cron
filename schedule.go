@@ -21,10 +21,8 @@ type Parser interface {
 	Parse(spec string) (Schedule, error)
 }
 
-// ConstantDelay is a fixed-interval Schedule. The interval has a 1s floor:
-// sub-second durations fire every 1s. Whole-second intervals are aligned to
-// the second boundary; fractional intervals (e.g. 1500ms) keep their exact
-// period.
+// ConstantDelay is a process-anchored interval with a one-second floor.
+// Whole-second intervals align to second boundaries.
 type ConstantDelay time.Duration
 
 func (d ConstantDelay) Next(now time.Time) time.Time {
@@ -42,11 +40,8 @@ func (d ConstantDelay) String() string {
 	return "@every " + time.Duration(d).String()
 }
 
-// AlignedDelay is a fixed-interval Schedule aligned to the Unix epoch: every
-// instance computes identical fire instants, which makes it the right
-// interval schedule under a distributed Locker. ConstantDelay, by contrast,
-// anchors its phase at Add time, so staggered instances never share fire
-// keys. Non-positive intervals never fire.
+// AlignedDelay is an epoch-aligned interval for replicas that must compute the
+// same fire times. Non-positive intervals never fire.
 type AlignedDelay time.Duration
 
 func (d AlignedDelay) Next(now time.Time) time.Time {
@@ -98,7 +93,7 @@ type unionSchedule []Schedule
 func Union(schedules ...Schedule) Schedule {
 	u := make(unionSchedule, 0, len(schedules))
 	for _, s := range schedules {
-		if s != nil {
+		if !isNilLike(s) {
 			u = append(u, s)
 		}
 	}
@@ -132,7 +127,7 @@ func Filter(s Schedule, keep func(time.Time) bool) Schedule {
 }
 
 func (f filterSchedule) Next(now time.Time) time.Time {
-	if f.s == nil {
+	if isNilLike(f.s) {
 		return time.Time{}
 	}
 	cur := now

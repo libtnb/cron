@@ -13,27 +13,27 @@ import (
 )
 
 func main() {
-	c := cron.New(cron.WithLogger(slog.Default()))
+	c := cron.MustNew(cron.WithLogger(slog.Default()))
 
-	wf := workflow.MustNew(
-		workflow.NewStep("A", cron.JobFunc(func(ctx context.Context) error {
-			fmt.Println("A done")
-			return nil
-		})),
-		workflow.NewStep("B", cron.JobFunc(func(ctx context.Context) error {
-			fmt.Println("B done")
-			return nil
-		}), workflow.After("A", workflow.OnSuccess)),
-		workflow.NewStep("C", cron.JobFunc(func(ctx context.Context) error {
-			fmt.Println("C done")
-			return nil
-		}), workflow.After("A", workflow.OnSuccess)),
-		workflow.NewStep("D", cron.JobFunc(func(ctx context.Context) error {
-			fmt.Println("D done")
-			return nil
-		}), workflow.After("B", workflow.OnComplete), workflow.After("C", workflow.OnComplete)),
-	).WithOnComplete(func(e *workflow.Execution) {
-		fmt.Printf("workflow %s done: %v\n", e.ID, e.Results)
+	builder := workflow.New()
+	a := builder.Job("A", cron.JobFunc(func(ctx context.Context) error {
+		fmt.Println("A done")
+		return nil
+	}))
+	b := builder.Job("B", cron.JobFunc(func(ctx context.Context) error {
+		fmt.Println("B done")
+		return nil
+	}), workflow.After(a, workflow.OnSuccess))
+	cStep := builder.Job("C", cron.JobFunc(func(ctx context.Context) error {
+		fmt.Println("C done")
+		return nil
+	}), workflow.After(a, workflow.OnSuccess))
+	builder.Job("D", cron.JobFunc(func(ctx context.Context) error {
+		fmt.Println("D done")
+		return nil
+	}), workflow.After(b, workflow.OnComplete), workflow.After(cStep, workflow.OnComplete))
+	wf := builder.MustBuild().WithOnComplete(func(e *workflow.Execution) {
+		fmt.Printf("workflow %s done: %v\n", e.ID, e.Results())
 	})
 
 	_, _ = c.AddSchedule(cron.TriggeredSchedule(), wf, cron.WithName("dag"))

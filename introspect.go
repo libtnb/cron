@@ -7,7 +7,7 @@ import (
 
 // NextN returns the next n firings strictly after from.
 func NextN(s Schedule, from time.Time, n int) []time.Time {
-	if n <= 0 {
+	if isNilLike(s) || n <= 0 {
 		return nil
 	}
 	out := make([]time.Time, 0, n)
@@ -20,19 +20,18 @@ func NextN(s Schedule, from time.Time, n int) []time.Time {
 	return out
 }
 
-// Between returns every firing in (start, end].
-func Between(s Schedule, start, end time.Time) []time.Time {
-	if !end.After(start) {
-		return nil
-	}
-	var out []time.Time
-	for t := range upcomingSeq(s, start) {
-		if t.After(end) {
-			break
+// Between lazily yields every firing in (start, end].
+func Between(s Schedule, start, end time.Time) iter.Seq[time.Time] {
+	return func(yield func(time.Time) bool) {
+		if isNilLike(s) || !end.After(start) {
+			return
 		}
-		out = append(out, t)
+		for t := range upcomingSeq(s, start) {
+			if t.After(end) || !yield(t) {
+				return
+			}
+		}
 	}
-	return out
 }
 
 // upcomingSeq is a lazy iterator over firings strictly after from. Uses

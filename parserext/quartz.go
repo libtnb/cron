@@ -43,7 +43,7 @@ func NewQuartzParser(loc *time.Location) cron.Parser {
 	return &quartzParser{
 		loc:  loc,
 		std5: cron.NewStandardParser(cron.WithDefaultLocation(loc)),
-		std6: cron.NewStandardParser(cron.WithDefaultLocation(loc), cron.WithSeconds()),
+		std6: cron.NewStandardParser(cron.WithDefaultLocation(loc), cron.WithOptionalSeconds()),
 	}
 }
 
@@ -186,9 +186,9 @@ func (s *QuartzSchedule) Next(t time.Time) time.Time {
 			// See SpecSchedule.Next: time.Date resolves a nonexistent
 			// spring-forward hour to the pre-gap wall time, which wouldn't
 			// advance; step one wall hour instead and re-validate.
-			cand := time.Date(year, month, day, h, 0, 0, 0, loc)
-			if cand.Hour() == h && cand.After(t) {
-				t = cand
+			candidate := time.Date(year, month, day, h, 0, 0, 0, loc)
+			if candidate.Hour() == h && candidate.After(t) {
+				t = candidate
 			} else {
 				t = t.Add(time.Hour -
 					time.Duration(minute)*time.Minute -
@@ -316,10 +316,28 @@ func parseQuartz6(spec string, fields []string, loc *time.Location) (cron.Schedu
 	if err != nil {
 		return nil, &cron.ParseError{Spec: spec, Field: "second", Reason: err.Error(), Pos: -1}
 	}
-	return buildQuartz(spec, sec, fields[1], fields[2], fields[3], fields[4], fields[5], loc)
+	return buildQuartz(
+		spec,
+		sec,
+		fields[1],
+		fields[2],
+		fields[3],
+		fields[4],
+		fields[5],
+		loc,
+	)
 }
 
-func buildQuartz(spec string, sec uint64, minute, hour, dom, month, dow string, loc *time.Location) (cron.Schedule, error) {
+func buildQuartz(
+	spec string,
+	sec uint64,
+	minute string,
+	hour string,
+	dom string,
+	month string,
+	dow string,
+	loc *time.Location,
+) (cron.Schedule, error) {
 	min, err := bitmap(minute, 0, 59, nil)
 	if err != nil {
 		return nil, &cron.ParseError{Spec: spec, Field: "minute", Reason: err.Error(), Pos: -1}

@@ -83,9 +83,9 @@ func (s *SpecSchedule) Next(t time.Time) time.Time {
 			// time.Date resolves a nonexistent spring-forward hour to the pre-gap
 			// wall time (02:00 -> 01:00), which wouldn't advance; step one wall
 			// hour in that case and let the loop re-validate.
-			cand := time.Date(year, month, day, h, 0, 0, 0, loc)
-			if cand.Hour() == h && cand.After(t) {
-				t = cand
+			candidate := time.Date(year, month, day, h, 0, 0, 0, loc)
+			if candidate.Hour() == h && candidate.After(t) {
+				t = candidate
 			} else {
 				t = t.Add(time.Hour -
 					time.Duration(minute)*time.Minute -

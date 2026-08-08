@@ -5,6 +5,10 @@ import (
 	"time"
 )
 
+type typedNilInternalSchedule struct{}
+
+func (*typedNilInternalSchedule) Next(time.Time) time.Time { return time.Time{} }
+
 func TestConstantDelay_Next(t *testing.T) {
 	d := ConstantDelay(2 * time.Minute)
 	from := t0(2026, 1, 1, 0, 0, 0).Add(123 * time.Millisecond)
@@ -115,6 +119,10 @@ func TestUnion(t *testing.T) {
 	if got := Union().Next(from); !got.IsZero() {
 		t.Fatalf("empty union: got %v", got)
 	}
+	var nilSchedule *typedNilInternalSchedule
+	if got := Union(nilSchedule).Next(from); !got.IsZero() {
+		t.Fatalf("typed-nil union member: got %v", got)
+	}
 }
 
 func TestFilter(t *testing.T) {
@@ -131,6 +139,10 @@ func TestFilter(t *testing.T) {
 	}
 	if got := Filter(nil, nil).Next(from); !got.IsZero() {
 		t.Fatalf("nil schedule: got %v", got)
+	}
+	var nilSchedule *typedNilInternalSchedule
+	if got := Filter(nilSchedule, nil).Next(from); !got.IsZero() {
+		t.Fatalf("typed-nil schedule: got %v", got)
 	}
 	// A finite schedule that never satisfies keep returns zero via exhaustion.
 	never := Filter(OnceAt(from.Add(time.Hour)), func(time.Time) bool { return false })

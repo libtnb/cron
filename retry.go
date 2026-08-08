@@ -19,9 +19,8 @@ type RetryPolicy struct {
 	JitterFrac float64
 }
 
-// IsZero is keyed only on MaxRetries so half-filled policies (e.g. only
-// Initial set) don't produce a useless wrapper.
-func (p RetryPolicy) IsZero() bool { return p.MaxRetries == 0 }
+// RetryOption configures a RetryPolicy built by Retry.
+type RetryOption func(*RetryPolicy)
 
 // Retry builds a RetryPolicy. maxRetries is the number of retries after the
 // initial attempt; negative retries until ctx cancellation.
@@ -32,9 +31,6 @@ func Retry(maxRetries int, opts ...RetryOption) RetryPolicy {
 	}
 	return p
 }
-
-// RetryOption configures a RetryPolicy built by Retry.
-type RetryOption func(*RetryPolicy)
 
 // RetryInitial sets the first retry delay (default 1s).
 func RetryInitial(d time.Duration) RetryOption {
@@ -56,36 +52,9 @@ func RetryJitterFrac(f float64) RetryOption {
 	return func(p *RetryPolicy) { p.JitterFrac = f }
 }
 
-func (p RetryPolicy) backoff(attempt int) time.Duration {
-	d := p.Initial
-	if d <= 0 {
-		d = time.Second
-	}
-	mult := p.Multiplier
-	for range attempt {
-		if mult > 1 {
-			d = time.Duration(float64(d) * mult)
-		}
-		if p.MaxDelay > 0 && d > p.MaxDelay {
-			d = p.MaxDelay
-			break
-		}
-	}
-	// The loop skips attempt 0, so cap it here too.
-	if p.MaxDelay > 0 && d > p.MaxDelay {
-		d = p.MaxDelay
-	}
-	if p.JitterFrac > 0 {
-		jit := time.Duration(float64(d) * p.JitterFrac)
-		if jit > 0 {
-			d += mathrand.N(2*jit) - jit
-		}
-		if d < 0 {
-			d = 0
-		}
-	}
-	return d
-}
+// IsZero is keyed only on MaxRetries so half-filled policies (e.g. only
+// Initial set) don't produce a useless wrapper.
+func (p RetryPolicy) IsZero() bool { return p.MaxRetries == 0 }
 
 // Wrapper returns a Wrapper that retries on error per p. Attempt errors are
 // joined via errors.Join; ctx cancellation aborts, recording context.Cause so
@@ -134,4 +103,50 @@ func (p RetryPolicy) Wrapper() Wrapper {
 			return errors.Join(errs...)
 		})
 	}
+}
+
+func (p RetryPolicy) validate() error {
+	switch {
+	case p.Initial < 0:
+		return errors.New("initial delay must not be negative")
+	case p.MaxDelay < 0:
+		return errors.New("max delay must not be negative")
+	case p.Multiplier < 0:
+		return errors.New("multiplier must not be negative")
+	case p.JitterFrac < 0 || p.JitterFrac > 1:
+		return errors.New("jitter fraction must be between 0 and 1")
+	default:
+		return nil
+	}
+}
+
+func (p RetryPolicy) backoff(attempt int) time.Duration {
+	d := p.Initial
+	if d <= 0 {
+		d = time.Second
+	}
+	mult := p.Multiplier
+	for range attempt {
+		if mult > 1 {
+			d = time.Duration(float64(d) * mult)
+		}
+		if p.MaxDelay > 0 && d > p.MaxDelay {
+			d = p.MaxDelay
+			break
+		}
+	}
+	// The loop skips attempt 0, so cap it here too.
+	if p.MaxDelay > 0 && d > p.MaxDelay {
+		d = p.MaxDelay
+	}
+	if p.JitterFrac > 0 {
+		jit := time.Duration(float64(d) * p.JitterFrac)
+		if jit > 0 {
+			d += mathrand.N(2*jit) - jit
+		}
+		if d < 0 {
+			d = 0
+		}
+	}
+	return d
 }

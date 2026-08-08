@@ -2,7 +2,6 @@ package cron
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
@@ -23,13 +22,14 @@ const defaultParseCacheLimit = 1024
 type entry struct {
 	id       EntryID
 	name     string
+	key      string
 	spec     string
 	schedule Schedule
 	wrapped  Job // global+entry chain applied
 	timeout  time.Duration
 	jitter   time.Duration
 	missed   MissedFirePolicy
-	locker   Locker
+	claimer  Claimer
 
 	next   time.Time
 	prev   time.Time
@@ -84,12 +84,13 @@ type Cron struct {
 	mu      sync.Mutex         // guards h, byEntry, entry mutation
 	h       *heap.Heap[*entry] // scheduling heap
 	byEntry map[EntryID]*entry // canonical entry table
+	byKey   map[string]EntryID // non-empty stable keys, unique within the scheduler
 	nextID  atomic.Uint64
 
 	viewMu sync.RWMutex // guards the views map structure; cell values are atomic
 	views  viewMap      // snapshot map read by Entry/Entries
 
-	hooks *hookDispatcher
+	events *eventBus
 
 	running atomic.Bool
 	wakeCh  chan struct{}
@@ -103,13 +104,20 @@ type Cron struct {
 
 	wg       sync.WaitGroup
 	inflight atomic.Int64
+	jobsDone chan struct{}
+	jobsOnce sync.Once
 }
 
 // New constructs a Cron. It does not start scheduling until Start is called.
-func New(opts ...Option) *Cron {
+func New(opts ...Option) (*Cron, error) {
 	cfg := config{}
-	for _, o := range opts {
-		o(&cfg)
+	for i, o := range opts {
+		if o == nil {
+			return nil, fmt.Errorf("%w: option %d is nil", ErrInvalidOption, i)
+		}
+		if err := o(&cfg); err != nil {
+			return nil, err
+		}
 	}
 	if cfg.loc == nil {
 		cfg.loc = time.Local
@@ -120,7 +128,7 @@ func New(opts ...Option) *Cron {
 	if cfg.parser == nil {
 		popts := []ParserOption{WithDefaultLocation(cfg.loc)}
 		if cfg.secondsField {
-			popts = append(popts, WithSeconds())
+			popts = append(popts, WithOptionalSeconds())
 		}
 		cfg.parser = NewStandardParser(popts...)
 	} else if cfg.locSet {
@@ -131,14 +139,25 @@ func New(opts ...Option) *Cron {
 	}
 
 	c := &Cron{
-		cfg:     cfg,
-		h:       heap.New[*entry](),
-		byEntry: make(map[EntryID]*entry),
-		views:   make(viewMap),
-		wakeCh:  make(chan struct{}, 1),
+		cfg:      cfg,
+		h:        heap.New[*entry](),
+		byEntry:  make(map[EntryID]*entry),
+		byKey:    make(map[string]EntryID),
+		views:    make(viewMap),
+		wakeCh:   make(chan struct{}, 1),
+		jobsDone: make(chan struct{}),
 	}
 	c.parseCache.Limit = defaultParseCacheLimit
-	c.hooks = newHookDispatcher(cfg.hooks, cfg.logger, cfg.recorder, cfg.hookBuffer)
+	c.events = newEventBus(cfg.observers, cfg.recorder, cfg.logger, cfg.observerBuffer)
+	return c, nil
+}
+
+// MustNew constructs a Cron and panics if an option is invalid.
+func MustNew(opts ...Option) *Cron {
+	c, err := New(opts...)
+	if err != nil {
+		panic(err)
+	}
 	return c
 }
 
@@ -169,7 +188,7 @@ func (c *Cron) Update(id EntryID, spec string) error {
 
 // UpdateSchedule is Update for a programmatic Schedule.
 func (c *Cron) UpdateSchedule(id EntryID, s Schedule) error {
-	if s == nil {
+	if isNilLike(s) {
 		return ErrNilSchedule
 	}
 	return c.updateSchedule(id, "", s)
@@ -189,11 +208,14 @@ func (c *Cron) Remove(id EntryID) bool {
 		e.item = nil
 	}
 	delete(c.byEntry, id)
+	if e.key != "" {
+		delete(c.byKey, e.key)
+	}
 	c.publishViewRemove(id)
 	heapLen := c.h.Len()
 	c.mu.Unlock()
 	c.wake()
-	recordQueueDepth(c.cfg.recorder, heapLen)
+	c.events.publish(QueueDepthEvent{Depth: heapLen})
 	return true
 }
 
@@ -220,7 +242,7 @@ func (c *Cron) Pause(id EntryID) bool {
 	heapLen := c.h.Len()
 	c.mu.Unlock()
 	c.wake()
-	recordQueueDepth(c.cfg.recorder, heapLen)
+	c.events.publish(QueueDepthEvent{Depth: heapLen})
 	return true
 }
 
@@ -268,11 +290,10 @@ func (c *Cron) Resume(id EntryID) bool {
 	c.mu.Unlock()
 
 	c.wake()
-	recordQueueDepth(c.cfg.recorder, heapLen)
+	c.events.publish(QueueDepthEvent{Depth: heapLen})
 	if !next.IsZero() {
-		recordJobScheduled(c.cfg.recorder, name)
-		c.hooks.emitSchedule(EventSchedule{
-			EntryID: id, Name: name, Schedule: s, Next: next,
+		c.events.publish(ScheduleEvent{
+			Entry: EntryRef{ID: id, Key: cur.key, Name: name}, Schedule: s, Next: next,
 		})
 	}
 	return true
@@ -287,6 +308,9 @@ func (c *Cron) Trigger(id EntryID) error { return c.trigger(id, nil) }
 // returns, yielding the job's error. ctx bounds only the wait; on ctx
 // cancellation the job keeps running.
 func (c *Cron) TriggerAndWait(ctx context.Context, id EntryID) error {
+	if ctx == nil {
+		return ErrNilContext
+	}
 	result := make(chan error, 1)
 	if err := c.trigger(id, result); err != nil {
 		return err
@@ -365,14 +389,17 @@ func (c *Cron) Start() error {
 func (c *Cron) Running() bool { return c.running.Load() }
 
 // Stop halts the scheduler, cancels in-flight jobs (ErrCronStopping as the
-// cause), and waits for the loop, jobs and hook dispatcher to drain, capped
+// cause), and waits for the loop, jobs, and observer queue to drain, capped
 // by ctx. Returns ctx.Err() on timeout. Do not call it from inside a Job.
 func (c *Cron) Stop(ctx context.Context) error {
+	if ctx == nil {
+		return ErrNilContext
+	}
 	c.startMu.Lock()
 	c.started = true
 	if c.runDone == nil {
 		c.startMu.Unlock()
-		return c.hooks.close(ctx)
+		return c.events.close(ctx)
 	}
 	c.running.Store(false)
 	c.runCancel(ErrCronStopping)
@@ -384,11 +411,14 @@ func (c *Cron) Stop(ctx context.Context) error {
 // Drain is Stop without cancelling in-flight jobs: it stops scheduling new
 // fires and waits for running jobs to finish naturally, capped by ctx.
 func (c *Cron) Drain(ctx context.Context) error {
+	if ctx == nil {
+		return ErrNilContext
+	}
 	c.startMu.Lock()
 	c.started = true
 	if c.runDone == nil {
 		c.startMu.Unlock()
-		return c.hooks.close(ctx)
+		return c.events.close(ctx)
 	}
 	if c.running.Swap(false) {
 		c.loopCancel()
@@ -407,19 +437,28 @@ func (c *Cron) parse(spec string) (Schedule, error) {
 		c.parseCache.Forget(spec)
 		return nil, err
 	}
+	if isNilLike(s) {
+		c.parseCache.Forget(spec)
+		return nil, ErrNilSchedule
+	}
 	return s, nil
 }
 
 func (c *Cron) add(spec string, s Schedule, j Job, opts ...EntryOption) (EntryID, error) {
-	if s == nil {
+	if isNilLike(s) {
 		return 0, ErrNilSchedule
 	}
-	if j == nil {
+	if isNilLike(j) {
 		return 0, ErrNilJob
 	}
 	ec := entryConfig{}
-	for _, o := range opts {
-		o(&ec)
+	for i, o := range opts {
+		if o == nil {
+			return 0, fmt.Errorf("%w: entry option %d is nil", ErrInvalidOption, i)
+		}
+		if err := o(&ec); err != nil {
+			return 0, err
+		}
 	}
 
 	wrappers := make([]Wrapper, 0, len(c.cfg.chain)+len(ec.chain)+1)
@@ -433,6 +472,9 @@ func (c *Cron) add(spec string, s Schedule, j Job, opts ...EntryOption) (EntryID
 		wrappers = append(wrappers, rp.Wrapper())
 	}
 	wrapped := Chain(wrappers...)(j)
+	if isNilLike(wrapped) {
+		return 0, ErrNilJob
+	}
 
 	missed := c.cfg.missedPolicy
 	if ec.missedSet {
@@ -442,22 +484,21 @@ func (c *Cron) add(spec string, s Schedule, j Job, opts ...EntryOption) (EntryID
 	if ec.jitterSet {
 		jitter = ec.jitter
 	}
-	locker := c.cfg.locker
-	if ec.lockerSet {
-		locker = ec.locker
+	claimer := c.cfg.claimer
+	if ec.claimerSet {
+		claimer = ec.claimer
 	}
-	if locker != nil {
-		if ec.name == "" {
-			// The name is the cross-instance component of FireKey; the EntryID
-			// fallback is process-local and silently breaks exactly-once during
-			// rolling deploys, so refuse instead of degrading.
-			return 0, ErrLockerRequiresName
+	if claimer != nil {
+		if ec.key == "" {
+			return 0, ErrClaimerRequiresKey
 		}
 		if _, ok := s.(ConstantDelay); ok {
 			// Not rejected: identical replicas registering together do share
 			// keys. But any stagger desynchronizes the phases for good.
-			c.cfg.logger.Warn("cron: ConstantDelay phase is process-local; staggered instances will not share fire keys — use AlignedDelay or a cron expression under a Locker",
-				slog.String("name", ec.name))
+			c.cfg.logger.Warn(
+				"cron: ConstantDelay is process-local; use AlignedDelay or a cron expression with a Claimer",
+				slog.String("key", ec.key),
+			)
 		}
 	}
 	anchor := ec.lastRun
@@ -470,13 +511,14 @@ func (c *Cron) add(spec string, s Schedule, j Job, opts ...EntryOption) (EntryID
 	e := &entry{
 		id:       id,
 		name:     ec.name,
+		key:      ec.key,
 		spec:     spec,
 		schedule: s,
 		wrapped:  wrapped,
 		timeout:  ec.timeout,
 		jitter:   jitter,
 		missed:   missed,
-		locker:   locker,
+		claimer:  claimer,
 		next:     next,
 		prev:     ec.lastRun,
 	}
@@ -485,6 +527,13 @@ func (c *Cron) add(spec string, s Schedule, j Job, opts ...EntryOption) (EntryID
 	if c.cfg.maxEntries > 0 && len(c.byEntry) >= c.cfg.maxEntries {
 		c.mu.Unlock()
 		return 0, ErrCapacityReached
+	}
+	if e.key != "" {
+		if _, exists := c.byKey[e.key]; exists {
+			c.mu.Unlock()
+			return 0, fmt.Errorf("%w: %q", ErrDuplicateKey, e.key)
+		}
+		c.byKey[e.key] = id
 	}
 	if !e.next.IsZero() {
 		e.item = c.h.Push(e.next.UnixNano(), e)
@@ -495,11 +544,10 @@ func (c *Cron) add(spec string, s Schedule, j Job, opts ...EntryOption) (EntryID
 	heapLen := c.h.Len()
 	c.mu.Unlock()
 
-	recordJobScheduled(c.cfg.recorder, e.name)
-	recordQueueDepth(c.cfg.recorder, heapLen)
-	c.hooks.emitSchedule(EventSchedule{
-		EntryID: id, Name: e.name, Schedule: s, Next: e.next,
+	c.events.publish(ScheduleEvent{
+		Entry: entryRef(e), Schedule: s, Next: e.next,
 	})
+	c.events.publish(QueueDepthEvent{Depth: heapLen})
 	c.wake()
 	return id, nil
 }
@@ -535,11 +583,10 @@ func (c *Cron) updateSchedule(id EntryID, spec string, s Schedule) error {
 	c.mu.Unlock()
 
 	c.wake()
-	recordQueueDepth(c.cfg.recorder, heapLen)
+	c.events.publish(QueueDepthEvent{Depth: heapLen})
 	if !emitNext.IsZero() {
-		recordJobScheduled(c.cfg.recorder, name)
-		c.hooks.emitSchedule(EventSchedule{
-			EntryID: id, Name: name, Schedule: s, Next: emitNext,
+		c.events.publish(ScheduleEvent{
+			Entry: EntryRef{ID: id, Key: e.key, Name: name}, Schedule: s, Next: emitNext,
 		})
 	}
 	return nil
@@ -561,11 +608,9 @@ func (c *Cron) trigger(id EntryID, result chan<- error) error {
 	}
 	if !c.tryReserveInflight() {
 		c.mu.Unlock()
-		recordJobMissed(c.cfg.recorder, e.name, 0)
-		c.hooks.emitMissed(EventMissed{
-			EntryID: e.id, Name: e.name,
-			ScheduledAt: fireAt, Lateness: 0,
-			Policy: e.missed,
+		c.events.publish(RejectedFireEvent{
+			Entry: entryRef(e), ScheduledAt: fireAt,
+			Reason: RejectConcurrencyLimit,
 		})
 		return ErrConcurrencyLimit
 	}
@@ -596,21 +641,23 @@ func (c *Cron) awaitShutdown(ctx context.Context, done <-chan struct{}) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	wait := make(chan struct{})
-	go func() {
-		c.wg.Wait()
-		close(wait)
-	}()
+	c.jobsOnce.Do(func() {
+		go func() {
+			c.wg.Wait()
+			close(c.jobsDone)
+		}()
+	})
 	select {
-	case <-wait:
+	case <-c.jobsDone:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	return c.hooks.close(ctx)
+	return c.events.close(ctx)
 }
 
 func (c *Cron) loop(ctx context.Context) {
 	defer close(c.runDone)
+	defer c.running.Store(false)
 	timer := time.NewTimer(time.Hour)
 	defer timer.Stop()
 
@@ -666,7 +713,7 @@ func (c *Cron) fireDue(ctx context.Context, now time.Time) {
 	}
 
 	if len(due) > 0 {
-		recordQueueDepth(c.cfg.recorder, c.heapLen())
+		c.events.publish(QueueDepthEvent{Depth: c.heapLen()})
 	}
 }
 
@@ -696,7 +743,8 @@ func (c *Cron) makeFirePlan(d dueFire, now time.Time) firePlan {
 func (c *Cron) commitAndDispatch(ctx context.Context, p firePlan) {
 	c.mu.Lock()
 	cur, ok := c.byEntry[p.e.id]
-	if !ok || cur != p.e || cur.gen != p.gen {
+	stalePlan := !ok || cur != p.e || cur.gen != p.gen
+	if stalePlan {
 		// Removed, paused, resumed, or updated since the pop; the plan is stale.
 		c.mu.Unlock()
 		return
@@ -707,12 +755,12 @@ func (c *Cron) commitAndDispatch(ctx context.Context, p firePlan) {
 		fires = []time.Time{p.fireOne}
 	}
 	var run []time.Time
-	rejected := 0
+	var rejected []time.Time
 	for _, ft := range fires {
 		if c.tryReserveInflight() {
 			run = append(run, ft)
 		} else {
-			rejected++
+			rejected = append(rejected, ft)
 		}
 	}
 
@@ -732,27 +780,33 @@ func (c *Cron) commitAndDispatch(ctx context.Context, p firePlan) {
 	c.mu.Unlock()
 
 	if p.missed {
-		recordJobMissed(c.cfg.recorder, name, p.lateness)
-		c.hooks.emitMissed(EventMissed{
-			EntryID: p.e.id, Name: name,
+		c.events.publish(MissedFireEvent{
+			Entry: EntryRef{
+				ID:   p.e.id,
+				Key:  p.e.key,
+				Name: name,
+			},
 			ScheduledAt: p.scheduled, Lateness: p.lateness,
 			Policy: policy,
 		})
-	} else if !p.fireOne.IsZero() && rejected > 0 {
-		// On-time fire rejected by the concurrency limit; late fires already
-		// emitted one missed event above.
-		lateness := time.Since(p.fireOne)
-		recordJobMissed(c.cfg.recorder, name, lateness)
-		c.hooks.emitMissed(EventMissed{
-			EntryID: p.e.id, Name: name,
-			ScheduledAt: p.fireOne, Lateness: lateness,
-			Policy: policy,
+	}
+	for _, scheduledAt := range rejected {
+		c.events.publish(RejectedFireEvent{
+			Entry: EntryRef{
+				ID:   p.e.id,
+				Key:  p.e.key,
+				Name: name,
+			},
+			ScheduledAt: scheduledAt, Reason: RejectConcurrencyLimit,
 		})
 	}
 	if !nextEmit.IsZero() {
-		recordJobScheduled(c.cfg.recorder, name)
-		c.hooks.emitSchedule(EventSchedule{
-			EntryID: p.e.id, Name: name,
+		c.events.publish(ScheduleEvent{
+			Entry: EntryRef{
+				ID:   p.e.id,
+				Key:  p.e.key,
+				Name: name,
+			},
 			Schedule: p.schedule, Next: nextEmit,
 		})
 	}
@@ -767,49 +821,39 @@ func (c *Cron) dispatch(parent context.Context, e *entry, scheduledAt time.Time,
 		// Manual triggers carry opts.result and skip jitter, so this abort path
 		// never owes a result.
 		if !opts.manual && !c.applyJitter(parent, e.jitter) {
-			// Reachable only when Stop cancels mid-jitter; record it so the
-			// reserved fire isn't dropped silently.
-			lateness := time.Since(scheduledAt)
-			recordJobMissed(c.cfg.recorder, e.name, lateness)
-			c.hooks.emitMissed(EventMissed{
-				EntryID: e.id, Name: e.name,
-				ScheduledAt: scheduledAt, Lateness: lateness,
-				Policy: e.missed,
+			c.events.publish(CanceledFireEvent{
+				Entry: entryRef(e), ScheduledAt: scheduledAt,
+				Cause: context.Cause(parent),
 			})
 			return
 		}
 
 		// Distributed coordination runs after jitter (which spreads the fleet's
-		// Lock calls) and before the timeout ctx. Manual triggers bypass it:
+		// backend calls) and before the timeout ctx. Manual triggers bypass it:
 		// Trigger means "run it HERE now", and manual fires are the only ones
 		// carrying opts.result, so these skip paths never owe a result.
 		if !opts.manual {
 			if el := c.cfg.elector; el != nil {
-				if err := el.IsLeader(parent); err != nil {
-					c.skipFire(e, scheduledAt, SkipNotLeader, err)
+				leader, err := el.IsLeader(parent)
+				if err != nil {
+					c.skipFire(e, scheduledAt, SkipElectionError, err)
+					return
+				}
+				if !leader {
+					c.skipFire(e, scheduledAt, SkipNotLeader, nil)
 					return
 				}
 			}
-			if e.locker != nil {
-				release, err := e.locker.Lock(parent, FireKey(e.name, e.id, scheduledAt))
+			if e.claimer != nil {
+				claimed, err := e.claimer.Claim(parent, fireKey(e.key, scheduledAt))
 				if err != nil {
-					reason := SkipLockError
-					if errors.Is(err, ErrLockHeld) {
-						reason = SkipLockHeld
-					}
-					c.skipFire(e, scheduledAt, reason, err)
+					c.skipFire(e, scheduledAt, SkipClaimError, err)
 					return
 				}
-				// Release after the job with a ctx detached from cancellation,
-				// so Stop or a job timeout cannot prevent it; TTL is the net.
-				defer func() {
-					rctx, cancel := context.WithTimeout(context.WithoutCancel(parent), releaseTimeout)
-					defer cancel()
-					if rerr := release(rctx); rerr != nil {
-						c.cfg.logger.Error("cron: lock release failed",
-							slog.String("name", e.name), slog.Any("error", rerr))
-					}
-				}()
+				if !claimed {
+					c.skipFire(e, scheduledAt, SkipAlreadyClaimed, nil)
+					return
+				}
 			}
 		}
 
@@ -822,21 +866,18 @@ func (c *Cron) dispatch(parent context.Context, e *entry, scheduledAt time.Time,
 			defer cancel()
 		}
 		jobCtx = context.WithValue(jobCtx, entryInfoKey{}, EntryInfo{
-			ID: e.id, Name: e.name, ScheduledAt: scheduledAt,
+			ID: e.id, Name: e.name, Key: e.key, ScheduledAt: scheduledAt,
 		})
 
 		fireAt := time.Now()
-		recordJobStarted(c.cfg.recorder, e.name)
-		c.hooks.emitJobStart(EventJobStart{
-			EntryID: e.id, Name: e.name,
-			ScheduledAt: scheduledAt, FireAt: fireAt,
+		c.events.publish(JobStartEvent{
+			Entry: entryRef(e), ScheduledAt: scheduledAt, StartedAt: fireAt,
 		})
 		err := c.runJob(jobCtx, e)
 		dur := time.Since(fireAt)
-		recordJobCompleted(c.cfg.recorder, e.name, dur, err)
-		c.hooks.emitJobComplete(EventJobComplete{
-			EntryID: e.id, Name: e.name,
-			ScheduledAt: scheduledAt, FireAt: fireAt,
+		c.events.publish(JobCompleteEvent{
+			Entry:       entryRef(e),
+			ScheduledAt: scheduledAt, StartedAt: fireAt,
 			Duration: dur,
 			Err:      err,
 		})
@@ -851,9 +892,8 @@ func (c *Cron) dispatch(parent context.Context, e *entry, scheduledAt time.Time,
 
 // skipFire records a fire suppressed by distributed coordination.
 func (c *Cron) skipFire(e *entry, scheduledAt time.Time, reason SkipReason, err error) {
-	recordJobSkipped(c.cfg.recorder, e.name, reason)
-	c.hooks.emitSkipped(EventSkipped{
-		EntryID: e.id, Name: e.name,
+	c.events.publish(SkippedFireEvent{
+		Entry:       entryRef(e),
 		ScheduledAt: scheduledAt, Reason: reason, Err: err,
 	})
 }
@@ -982,6 +1022,7 @@ func entryView(e *entry) Entry {
 	return Entry{
 		ID:       e.id,
 		Name:     e.name,
+		Key:      e.key,
 		Spec:     e.spec,
 		Schedule: e.schedule,
 		Prev:     e.prev,

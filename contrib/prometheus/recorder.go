@@ -1,27 +1,25 @@
-// Package cronprom exposes cron scheduler activity as Prometheus metrics.
-// Recorder implements every cron recorder sub-interface; plug it in with
-// cron.WithRecorder. Job names become label values, so keep them low-
-// cardinality.
+// Package cronprom exposes cron scheduler events as Prometheus metrics.
 package cronprom
 
 import (
-	"time"
+	"errors"
+	"fmt"
+	"math"
+	"reflect"
+	"slices"
 
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/libtnb/cron"
 )
 
-// Compile-time interface conformance.
 var (
-	_ cron.JobScheduledRecorder = (*Recorder)(nil)
-	_ cron.JobStartedRecorder   = (*Recorder)(nil)
-	_ cron.JobCompletedRecorder = (*Recorder)(nil)
-	_ cron.JobMissedRecorder    = (*Recorder)(nil)
-	_ cron.JobSkippedRecorder   = (*Recorder)(nil)
-	_ cron.QueueDepthRecorder   = (*Recorder)(nil)
-	_ cron.HookDroppedRecorder  = (*Recorder)(nil)
+	_ cron.Recorder        = (*Recorder)(nil)
+	_ prometheus.Collector = (*Recorder)(nil)
 )
+
+// ErrInvalidOption reports an invalid Recorder option.
+var ErrInvalidOption = errors.New("cronprom: invalid option")
 
 type config struct {
 	namespace       string
@@ -31,40 +29,64 @@ type config struct {
 }
 
 // Option configures New.
-type Option func(*config)
+type Option func(*config) error
 
 // WithNamespace sets the metric namespace. Default "cron".
 func WithNamespace(ns string) Option {
-	return func(c *config) { c.namespace = ns }
+	return func(c *config) error {
+		c.namespace = ns
+		return nil
+	}
 }
 
 // WithRegisterer sets where collectors register. Default
 // prometheus.DefaultRegisterer.
 func WithRegisterer(r prometheus.Registerer) Option {
-	return func(c *config) { c.registerer = r }
+	return func(c *config) error {
+		if nilLike(r) {
+			return fmt.Errorf("%w: registerer is nil", ErrInvalidOption)
+		}
+		c.registerer = r
+		return nil
+	}
 }
 
 // WithDurationBuckets overrides the job duration histogram buckets.
 func WithDurationBuckets(b []float64) Option {
-	return func(c *config) { c.durationBuckets = b }
+	return func(c *config) error {
+		if err := validateBuckets(b); err != nil {
+			return fmt.Errorf("%w: duration buckets: %v", ErrInvalidOption, err)
+		}
+		c.durationBuckets = slices.Clone(b)
+		return nil
+	}
 }
 
 // WithLatenessBuckets overrides the missed-fire lateness histogram buckets.
 func WithLatenessBuckets(b []float64) Option {
-	return func(c *config) { c.latenessBuckets = b }
+	return func(c *config) error {
+		if err := validateBuckets(b); err != nil {
+			return fmt.Errorf("%w: lateness buckets: %v", ErrInvalidOption, err)
+		}
+		c.latenessBuckets = slices.Clone(b)
+		return nil
+	}
 }
 
 // Recorder records scheduler activity as Prometheus metrics. Use New.
 type Recorder struct {
-	scheduled *prometheus.CounterVec
-	started   *prometheus.CounterVec
-	completed *prometheus.CounterVec
-	duration  *prometheus.HistogramVec
-	missed    *prometheus.CounterVec
-	lateness  *prometheus.HistogramVec
-	skipped   *prometheus.CounterVec
-	depth     prometheus.Gauge
-	dropped   prometheus.Counter
+	scheduled  *prometheus.CounterVec
+	started    *prometheus.CounterVec
+	completed  *prometheus.CounterVec
+	duration   *prometheus.HistogramVec
+	missed     *prometheus.CounterVec
+	lateness   *prometheus.HistogramVec
+	rejected   *prometheus.CounterVec
+	canceled   *prometheus.CounterVec
+	skipped    *prometheus.CounterVec
+	depth      prometheus.Gauge
+	dropped    prometheus.Counter
+	collectors []prometheus.Collector
 }
 
 // New builds and registers a Recorder. It returns the registration error if
@@ -76,8 +98,13 @@ func New(opts ...Option) (*Recorder, error) {
 		durationBuckets: prometheus.DefBuckets,
 		latenessBuckets: []float64{.1, .5, 1, 5, 15, 60, 300, 900, 3600},
 	}
-	for _, o := range opts {
-		o(&cfg)
+	for i, option := range opts {
+		if option == nil {
+			return nil, fmt.Errorf("%w: option %d is nil", ErrInvalidOption, i)
+		}
+		if err := option(&cfg); err != nil {
+			return nil, err
+		}
 	}
 
 	r := &Recorder{
@@ -99,11 +126,19 @@ func New(opts ...Option) (*Recorder, error) {
 		}, []string{"name"}),
 		missed: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: cfg.namespace, Name: "jobs_missed_total",
-			Help: "Missed fires and concurrency rejections.",
+			Help: "Fires late enough to invoke the missed-fire policy.",
 		}, []string{"name"}),
 		lateness: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: cfg.namespace, Name: "job_lateness_seconds",
 			Help: "How late missed fires were.", Buckets: cfg.latenessBuckets,
+		}, []string{"name"}),
+		rejected: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: cfg.namespace, Name: "jobs_rejected_total",
+			Help: "Fires rejected before job execution, by reason.",
+		}, []string{"name", "reason"}),
+		canceled: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: cfg.namespace, Name: "jobs_canceled_total",
+			Help: "Reserved fires canceled before job execution.",
 		}, []string{"name"}),
 		skipped: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: cfg.namespace, Name: "jobs_skipped_total",
@@ -114,42 +149,91 @@ func New(opts ...Option) (*Recorder, error) {
 			Help: "Entries currently scheduled in the timer heap.",
 		}),
 		dropped: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: cfg.namespace, Name: "hook_events_dropped_total",
-			Help: "Hook events dropped because the buffer was full.",
+			Namespace: cfg.namespace, Name: "observer_events_dropped_total",
+			Help: "Observer events dropped because the queue was full.",
 		}),
 	}
 
-	for _, c := range []prometheus.Collector{
+	r.collectors = []prometheus.Collector{
 		r.scheduled, r.started, r.completed, r.duration,
-		r.missed, r.lateness, r.skipped, r.depth, r.dropped,
-	} {
-		if err := cfg.registerer.Register(c); err != nil {
-			return nil, err
-		}
+		r.missed, r.lateness, r.rejected, r.canceled,
+		r.skipped, r.depth, r.dropped,
+	}
+	if err := cfg.registerer.Register(r); err != nil {
+		return nil, err
 	}
 	return r, nil
 }
 
-func (r *Recorder) JobScheduled(name string) { r.scheduled.WithLabelValues(name).Inc() }
-func (r *Recorder) JobStarted(name string)   { r.started.WithLabelValues(name).Inc() }
-
-func (r *Recorder) JobCompleted(name string, dur time.Duration, err error) {
-	status := "ok"
-	if err != nil {
-		status = "error"
+// Describe implements prometheus.Collector.
+func (r *Recorder) Describe(ch chan<- *prometheus.Desc) {
+	for _, collector := range r.collectors {
+		collector.Describe(ch)
 	}
-	r.completed.WithLabelValues(name, status).Inc()
-	r.duration.WithLabelValues(name).Observe(dur.Seconds())
 }
 
-func (r *Recorder) JobMissed(name string, lateness time.Duration) {
-	r.missed.WithLabelValues(name).Inc()
-	r.lateness.WithLabelValues(name).Observe(lateness.Seconds())
+// Collect implements prometheus.Collector.
+func (r *Recorder) Collect(ch chan<- prometheus.Metric) {
+	for _, collector := range r.collectors {
+		collector.Collect(ch)
+	}
 }
 
-func (r *Recorder) JobSkipped(name string, reason cron.SkipReason) {
-	r.skipped.WithLabelValues(name, reason.String()).Inc()
+// Record implements cron.Recorder. Job names become label values, so callers
+// should keep them low-cardinality.
+func (r *Recorder) Record(raw cron.Event) {
+	switch event := raw.(type) {
+	case cron.ScheduleEvent:
+		if !event.Next.IsZero() {
+			r.scheduled.WithLabelValues(event.Entry.Name).Inc()
+		}
+	case cron.JobStartEvent:
+		r.started.WithLabelValues(event.Entry.Name).Inc()
+	case cron.JobCompleteEvent:
+		status := "ok"
+		if event.Err != nil {
+			status = "error"
+		}
+		r.completed.WithLabelValues(event.Entry.Name, status).Inc()
+		r.duration.WithLabelValues(event.Entry.Name).Observe(event.Duration.Seconds())
+	case cron.MissedFireEvent:
+		r.missed.WithLabelValues(event.Entry.Name).Inc()
+		r.lateness.WithLabelValues(event.Entry.Name).Observe(event.Lateness.Seconds())
+	case cron.RejectedFireEvent:
+		r.rejected.WithLabelValues(event.Entry.Name, event.Reason.String()).Inc()
+	case cron.CanceledFireEvent:
+		r.canceled.WithLabelValues(event.Entry.Name).Inc()
+	case cron.SkippedFireEvent:
+		r.skipped.WithLabelValues(event.Entry.Name, event.Reason.String()).Inc()
+	case cron.QueueDepthEvent:
+		r.depth.Set(float64(event.Depth))
+	case cron.ObserverDropEvent:
+		r.dropped.Inc()
+	}
 }
 
-func (r *Recorder) QueueDepth(n int) { r.depth.Set(float64(n)) }
-func (r *Recorder) HookDropped()     { r.dropped.Inc() }
+func validateBuckets(buckets []float64) error {
+	for i, bucket := range buckets {
+		invalidBucket := math.IsNaN(bucket) || math.IsInf(bucket, 0) || bucket <= 0
+		if invalidBucket {
+			return fmt.Errorf("bucket %d must be finite and positive", i)
+		}
+		if i > 0 && bucket <= buckets[i-1] {
+			return fmt.Errorf("bucket %d must be greater than the previous bucket", i)
+		}
+	}
+	return nil
+}
+
+func nilLike(value any) bool {
+	if value == nil {
+		return true
+	}
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return rv.IsNil()
+	default:
+		return false
+	}
+}

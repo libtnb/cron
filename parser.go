@@ -13,22 +13,31 @@ const starBit = uint64(1) << 63
 // ParserOption configures NewStandardParser.
 type ParserOption func(*parserConfig)
 
-// WithSeconds enables a leading seconds field. By default the parser accepts
-// both 5- and 6-field specs (a 5-field spec is parsed with second=0). Pass
-// true to require exactly 6 fields.
-func WithSeconds(strict ...bool) ParserOption {
+// WithOptionalSeconds accepts both 5- and 6-field specs. A 5-field spec is
+// parsed with second=0.
+func WithOptionalSeconds() ParserOption {
 	return func(c *parserConfig) {
 		c.seconds = true
-		if len(strict) > 0 && strict[0] {
-			c.secondsStrict = true
-		}
 	}
 }
 
-// WithParserExt installs a pre-parse hook. Returning (nil, nil) falls through
-// to the standard parser.
+// WithRequiredSeconds requires exactly 6 fields, including leading seconds.
+func WithRequiredSeconds() ParserOption {
+	return func(c *parserConfig) {
+		c.seconds = true
+		c.secondsStrict = true
+	}
+}
+
+// WithParserExt consults ext before the standard parser. Returning (nil, nil)
+// falls through to standard parsing.
 func WithParserExt(ext Parser) ParserOption {
-	return func(c *parserConfig) { c.ext = ext }
+	return func(c *parserConfig) {
+		if isNilLike(ext) {
+			ext = nil
+		}
+		c.ext = ext
+	}
 }
 
 // WithDefaultLocation sets the default timezone for specs without
@@ -44,7 +53,7 @@ type parserConfig struct {
 	defaultLoc    *time.Location
 }
 
-// StandardParser is stateless and concurrent-safe.
+// StandardParser is safe for concurrent use after construction.
 type StandardParser struct {
 	cfg parserConfig
 }
@@ -68,7 +77,7 @@ func (p *StandardParser) Parse(spec string) (Schedule, error) {
 		if err != nil {
 			return nil, err
 		}
-		if s != nil {
+		if !isNilLike(s) {
 			return s, nil
 		}
 	}
@@ -108,7 +117,7 @@ func (p *StandardParser) Parse(spec string) (Schedule, error) {
 	}
 
 	idx := 0
-	var sec uint64
+	sec := uint64(1 << 0) // 0
 	if hasSeconds {
 		v, err := getField(spec, "second", fields[idx], boundsSecond)
 		if err != nil {
@@ -116,8 +125,6 @@ func (p *StandardParser) Parse(spec string) (Schedule, error) {
 		}
 		sec = v
 		idx++
-	} else {
-		sec = 1 << 0 // 0
 	}
 	min, err := getField(spec, "minute", fields[idx], boundsMinute)
 	if err != nil {
@@ -279,17 +286,33 @@ func rangeAll(b boundary) uint64 {
 }
 
 var (
-	boundsSecond = boundary{0, 59, nil}
-	boundsMinute = boundary{0, 59, nil}
-	boundsHour   = boundary{0, 23, nil}
-	boundsDom    = boundary{1, 31, nil}
-	boundsMonth  = boundary{1, 12, map[string]uint{
-		"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-		"jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+	boundsSecond = boundary{min: 0, max: 59}
+	boundsMinute = boundary{min: 0, max: 59}
+	boundsHour   = boundary{min: 0, max: 23}
+	boundsDom    = boundary{min: 1, max: 31}
+	boundsMonth  = boundary{min: 1, max: 12, names: map[string]uint{
+		"jan": 1,
+		"feb": 2,
+		"mar": 3,
+		"apr": 4,
+		"may": 5,
+		"jun": 6,
+		"jul": 7,
+		"aug": 8,
+		"sep": 9,
+		"oct": 10,
+		"nov": 11,
+		"dec": 12,
 	}}
 	// dow accepts 0-7 per POSIX; 7 is folded into Sunday after parsing.
-	boundsDow = boundary{0, 7, map[string]uint{
-		"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6,
+	boundsDow = boundary{min: 0, max: 7, names: map[string]uint{
+		"sun": 0,
+		"mon": 1,
+		"tue": 2,
+		"wed": 3,
+		"thu": 4,
+		"fri": 5,
+		"sat": 6,
 	}}
 )
 

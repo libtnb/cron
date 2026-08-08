@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	c := cron.New(
+	c := cron.MustNew(
 		cron.WithLogger(slog.Default()),
 		cron.WithParser(parserext.NewQuartzParser(time.UTC)),
 	)

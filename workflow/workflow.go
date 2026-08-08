@@ -1,38 +1,45 @@
-// Package workflow runs DAGs of cron.Jobs.
+// Package workflow builds typed DAGs of cron jobs.
 package workflow
 
 import (
 	"context"
-	crand "crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
+	"reflect"
+	"strings"
 	"time"
+	"uuid"
 
 	"github.com/libtnb/cron"
 )
 
+// Errors reported while configuring or executing a workflow.
 var (
 	ErrDuplicateStep = errors.New("workflow: duplicate step")
+	ErrDuplicateDep  = errors.New("workflow: duplicate dependency")
 	ErrUnknownDep    = errors.New("workflow: unknown dependency")
-	ErrCycle         = errors.New("workflow: cycle detected")
+	ErrCycle         = errors.New("workflow: dependency cycle")
 	ErrNilJob        = errors.New("workflow: step has no job")
+	ErrInvalidName   = errors.New("workflow: invalid step name")
+	ErrInvalidOption = errors.New("workflow: invalid option")
+	ErrBuilderFrozen = errors.New("workflow: builder is frozen")
+	ErrNilContext    = errors.New("workflow: nil context")
 )
 
+// ConfigError identifies the step involved in an invalid graph.
 type ConfigError struct {
 	Err  error
 	Step string
-	Dep  string // ErrUnknownDep / ErrCycle only
+	Dep  string
 }
 
 func (e *ConfigError) Error() string {
 	switch {
-	case errors.Is(e.Err, ErrDuplicateStep), errors.Is(e.Err, ErrNilJob):
+	case errors.Is(e.Err, ErrDuplicateStep), errors.Is(e.Err, ErrNilJob), errors.Is(e.Err, ErrInvalidName):
 		return fmt.Sprintf("%v: %q", e.Err, e.Step)
-	case errors.Is(e.Err, ErrUnknownDep):
+	case errors.Is(e.Err, ErrUnknownDep), errors.Is(e.Err, ErrDuplicateDep):
 		return fmt.Sprintf("%v: step %q depends on %q", e.Err, e.Step, e.Dep)
-	case errors.Is(e.Err, ErrCycle):
-		return fmt.Sprintf("%v: %q -> %q", e.Err, e.Step, e.Dep)
 	default:
 		return e.Err.Error()
 	}
@@ -40,14 +47,14 @@ func (e *ConfigError) Error() string {
 
 func (e *ConfigError) Unwrap() error { return e.Err }
 
-// Result is a Step outcome.
+// Result is a step outcome.
 type Result uint8
 
 const (
-	ResultPending Result = iota // never appears in a finished Execution
+	ResultPending Result = iota
 	ResultSuccess
-	ResultFailure // Job returned an error or panicked
-	ResultSkipped // a dep didn't satisfy this step's Condition, or ctx was cancelled
+	ResultFailure
+	ResultSkipped
 )
 
 func (r Result) String() string {
@@ -65,214 +72,566 @@ func (r Result) String() string {
 	}
 }
 
-// Condition selects which upstream outcome triggers a Step.
+// Condition selects the upstream result required by After.
 type Condition uint8
 
 const (
-	OnSuccess  Condition = iota // upstream succeeded
-	OnFailure                   // upstream failed
-	OnSkipped                   // upstream was skipped
-	OnComplete                  // any terminal state
+	conditionUnknown Condition = iota
+	OnSuccess
+	OnFailure
+	OnSkipped
+	OnComplete
 )
 
-func (c Condition) match(r Result) bool {
+// Unit is the output of a plain cron.Job step.
+type Unit struct{}
+
+type graphID struct{}
+
+// Output identifies one typed step output.
+type Output[T any] struct {
+	graph *graphID
+	name  string
+}
+
+// Name returns the step name.
+func (o Output[T]) Name() string { return o.name }
+
+type outputValue[T any] struct{ value T }
+
+// Inputs exposes the successful outputs of a step's declared dependencies.
+type Inputs struct {
+	graph   *graphID
+	allowed map[string]struct{}
+	values  map[string]any
+}
+
+// Get resolves a declared dependency with the exact output type.
+func (in Inputs) Get[T any](output Output[T]) (T, bool) {
+	var zero T
+	if output.graph == nil || output.graph != in.graph {
+		return zero, false
+	}
+	if _, ok := in.allowed[output.name]; !ok {
+		return zero, false
+	}
+	boxed, ok := in.values[output.name].(outputValue[T])
+	if !ok {
+		return zero, false
+	}
+	return boxed.value, true
+}
+
+type dependency struct {
+	graph *graphID
+	name  string
+	when  Condition
+}
+
+type step struct {
+	name    string
+	run     func(context.Context, Inputs) (any, error)
+	deps    []dependency
+	timeout time.Duration
+	retry   cron.RetryPolicy
+}
+
+// StepOption configures one step.
+type StepOption func(*step) error
+
+// After declares an upstream dependency and its required result.
+func After[T any](output Output[T], when Condition) StepOption {
+	return func(s *step) error {
+		if output.graph == nil || output.name == "" {
+			return fmt.Errorf("%w: dependency is empty", ErrInvalidOption)
+		}
+		if !when.valid() {
+			return fmt.Errorf("%w: unknown condition %d", ErrInvalidOption, when)
+		}
+		s.deps = append(s.deps, dependency{graph: output.graph, name: output.name, when: when})
+		return nil
+	}
+}
+
+// WithTimeout caps one step run. Zero disables the timeout.
+func WithTimeout(timeout time.Duration) StepOption {
+	return func(s *step) error {
+		if timeout < 0 {
+			return fmt.Errorf("%w: timeout must not be negative", ErrInvalidOption)
+		}
+		s.timeout = timeout
+		return nil
+	}
+}
+
+// WithRetry applies a retry policy to one step.
+func WithRetry(policy cron.RetryPolicy) StepOption {
+	return func(s *step) error {
+		invalidDelay := policy.Initial < 0 || policy.MaxDelay < 0 || policy.Multiplier < 0
+		invalidJitter := policy.JitterFrac < 0 || policy.JitterFrac > 1
+		if invalidDelay || invalidJitter {
+			return fmt.Errorf("%w: invalid retry policy", ErrInvalidOption)
+		}
+		s.retry = policy
+		return nil
+	}
+}
+
+const defaultMaxParallelism = 32
+
+type builderConfig struct {
+	maxParallelism int
+}
+
+// Option configures a Builder.
+type Option func(*builderConfig) error
+
+// WithMaxParallelism limits simultaneously running steps. The default is 32.
+func WithMaxParallelism(limit int) Option {
+	return func(config *builderConfig) error {
+		if limit <= 0 {
+			return fmt.Errorf("%w: max parallelism must be positive", ErrInvalidOption)
+		}
+		config.maxParallelism = limit
+		return nil
+	}
+}
+
+// Builder incrementally constructs one Workflow. Build freezes it. Builder is
+// not safe for concurrent use; its zero value is ready to use.
+type Builder struct {
+	graph      *graphID
+	config     builderConfig
+	steps      []step
+	errors     []error
+	frozen     bool
+	afterBuild error
+	built      *Workflow
+	buildErr   error
+}
+
+// New returns an empty Builder. Invalid options are reported by Build.
+func New(opts ...Option) *Builder {
+	builder := &Builder{}
+	builder.init()
+	for i, option := range opts {
+		if option == nil {
+			builder.errors = append(builder.errors,
+				fmt.Errorf("%w: option %d is nil", ErrInvalidOption, i))
+			continue
+		}
+		if err := option(&builder.config); err != nil {
+			builder.errors = append(builder.errors, err)
+		}
+	}
+	return builder
+}
+
+// Step adds a typed function step. Configuration errors are deferred to Build.
+func (b *Builder) Step[T any](
+	name string,
+	fn func(context.Context, Inputs) (T, error),
+	opts ...StepOption,
+) Output[T] {
+	if !b.canMutate() {
+		return Output[T]{}
+	}
+	output := Output[T]{graph: b.graph, name: name}
+	s := step{name: name}
+	if fn == nil {
+		b.errors = append(b.errors, &ConfigError{Err: ErrNilJob, Step: name})
+	} else {
+		s.run = func(ctx context.Context, inputs Inputs) (any, error) {
+			value, err := fn(ctx, inputs)
+			if err != nil {
+				return nil, err
+			}
+			return outputValue[T]{value: value}, nil
+		}
+	}
+	b.add(s, opts)
+	return output
+}
+
+// Job adds a cron.Job step. Configuration errors are deferred to Build.
+func (b *Builder) Job(name string, job cron.Job, opts ...StepOption) Output[Unit] {
+	if !b.canMutate() {
+		return Output[Unit]{}
+	}
+	output := Output[Unit]{graph: b.graph, name: name}
+	s := step{name: name}
+	if job == nil || isNilLike(job) {
+		b.errors = append(b.errors, &ConfigError{Err: ErrNilJob, Step: name})
+	} else {
+		s.run = func(ctx context.Context, _ Inputs) (any, error) {
+			if err := job.Run(ctx); err != nil {
+				return nil, err
+			}
+			return outputValue[Unit]{value: Unit{}}, nil
+		}
+	}
+	b.add(s, opts)
+	return output
+}
+
+// Build validates the graph, freezes the Builder, and returns an immutable
+// Workflow. Repeated calls return the same result.
+func (b *Builder) Build() (*Workflow, error) {
+	if b == nil {
+		return nil, errors.New("workflow: nil builder")
+	}
+	b.init()
+	if b.afterBuild != nil {
+		return nil, b.afterBuild
+	}
+	if b.frozen {
+		return b.built, b.buildErr
+	}
+	b.frozen = true
+	b.built, b.buildErr = b.compile()
+	return b.built, b.buildErr
+}
+
+// MustBuild is Build with panic-on-error semantics.
+func (b *Builder) MustBuild() *Workflow {
+	workflow, err := b.Build()
+	if err != nil {
+		panic(err)
+	}
+	return workflow
+}
+
+type compiledDependency struct {
+	step int
+	when Condition
+}
+
+type compiledStep struct {
+	name       string
+	run        func(context.Context, Inputs) (any, error)
+	deps       []compiledDependency
+	dependents []int
+	timeout    time.Duration
+	retry      cron.RetryPolicy
+}
+
+// Workflow is an immutable DAG and implements cron.Job.
+type Workflow struct {
+	graph          *graphID
+	steps          []compiledStep
+	maxParallelism int
+	onComplete     func(*Execution)
+}
+
+// WithOnComplete returns a copy that calls cb before Execute returns.
+func (w *Workflow) WithOnComplete(cb func(*Execution)) *Workflow {
+	copy := *w
+	copy.onComplete = cb
+	return &copy
+}
+
+// Run executes the DAG once and returns its joined error.
+func (w *Workflow) Run(ctx context.Context) error { return w.Execute(ctx).Err() }
+
+// Execute runs the DAG once. At most the configured number of steps run at
+// the same time.
+func (w *Workflow) Execute(ctx context.Context) *Execution {
+	var invocationErr error
+	if ctx == nil {
+		invocationErr = ErrNilContext
+		var cancel context.CancelCauseFunc
+		ctx, cancel = context.WithCancelCause(context.Background())
+		cancel(ErrNilContext)
+	}
+
+	id := uuid.NewV7()
+	begin := time.Now()
+	states := make([]stepState, len(w.steps))
+	remainingDeps := make([]int, len(w.steps))
+	ready := make([]int, 0, len(w.steps))
+	for i, step := range w.steps {
+		remainingDeps[i] = len(step.deps)
+		if len(step.deps) == 0 {
+			ready = append(ready, i)
+		}
+	}
+
+	done := make(chan stepDone, min(w.maxParallelism, max(1, len(w.steps))))
+	remaining := len(w.steps)
+	var running int
+	finish := func(completed stepDone) {
+		states[completed.index] = stepState{
+			result:    completed.result,
+			err:       completed.err,
+			output:    completed.output,
+			startedAt: completed.startedAt,
+			duration:  completed.duration,
+		}
+		remaining--
+		for _, dependent := range w.steps[completed.index].dependents {
+			remainingDeps[dependent]--
+			if remainingDeps[dependent] == 0 {
+				ready = append(ready, dependent)
+			}
+		}
+	}
+
+	for remaining > 0 {
+		for len(ready) > 0 && running < w.maxParallelism {
+			index := ready[0]
+			ready = ready[1:]
+			if err := context.Cause(ctx); err != nil {
+				finish(stepDone{index: index, result: ResultSkipped, err: err})
+				continue
+			}
+			if !dependenciesMatch(w.steps[index], states) {
+				finish(stepDone{index: index, result: ResultSkipped})
+				continue
+			}
+			inputs := buildInputs(
+				w.graph,
+				w.steps[index],
+				states,
+				w.steps,
+			)
+			running++
+			go func() {
+				done <- runStep(
+					ctx,
+					index,
+					w.steps[index],
+					inputs,
+				)
+			}()
+		}
+		if remaining == 0 {
+			break
+		}
+		if running == 0 {
+			panic("workflow: validated graph made no progress")
+		}
+		completed := <-done
+		running--
+		finish(completed)
+	}
+
+	execution := &Execution{
+		ID:            id,
+		StartedAt:     begin,
+		Duration:      time.Since(begin),
+		graph:         w.graph,
+		order:         make([]string, len(w.steps)),
+		steps:         make(map[string]StepReport, len(w.steps)),
+		invocationErr: invocationErr,
+	}
+	for i, step := range w.steps {
+		execution.order[i] = step.name
+		state := states[i]
+		execution.steps[step.name] = StepReport{
+			Result:    state.result,
+			Err:       state.err,
+			StartedAt: state.startedAt,
+			Duration:  state.duration,
+			output:    state.output,
+		}
+	}
+	if w.onComplete != nil {
+		w.onComplete(execution)
+	}
+	return execution
+}
+
+// StepReport contains one step's outcome.
+type StepReport struct {
+	Result    Result
+	Err       error
+	StartedAt time.Time
+	Duration  time.Duration
+	output    any
+}
+
+// Execution reports one completed Workflow run.
+type Execution struct {
+	ID            uuid.UUID
+	StartedAt     time.Time
+	Duration      time.Duration
+	graph         *graphID
+	order         []string
+	steps         map[string]StepReport
+	invocationErr error
+}
+
+// Result returns the named result.
+func (e *Execution) Result(name string) (Result, bool) {
+	report, ok := e.steps[name]
+	return report.Result, ok
+}
+
+// Error returns the named step error.
+func (e *Execution) Error(name string) error { return e.steps[name].Err }
+
+// Step returns the named report.
+func (e *Execution) Step(name string) (StepReport, bool) {
+	report, ok := e.steps[name]
+	return report, ok
+}
+
+// Results returns a copy of all results.
+func (e *Execution) Results() map[string]Result {
+	results := make(map[string]Result, len(e.steps))
+	for name, report := range e.steps {
+		results[name] = report.Result
+	}
+	return results
+}
+
+// Errors returns a copy of non-nil step errors.
+func (e *Execution) Errors() map[string]error {
+	errs := make(map[string]error)
+	for name, report := range e.steps {
+		if report.Err != nil {
+			errs[name] = report.Err
+		}
+	}
+	return errs
+}
+
+// Steps returns a copy of all reports.
+func (e *Execution) Steps() map[string]StepReport { return maps.Clone(e.steps) }
+
+// Get resolves a successful output from this execution.
+func (e *Execution) Get[T any](output Output[T]) (T, bool) {
+	var zero T
+	if output.graph == nil || output.graph != e.graph {
+		return zero, false
+	}
+	report, ok := e.steps[output.name]
+	if !ok || report.Result != ResultSuccess {
+		return zero, false
+	}
+	boxed, ok := report.output.(outputValue[T])
+	if !ok {
+		return zero, false
+	}
+	return boxed.value, true
+}
+
+// Err joins step errors in graph order.
+func (e *Execution) Err() error {
+	errs := make([]error, 0, len(e.steps)+1)
+	for _, name := range e.order {
+		if err := e.steps[name].Err; err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) == 0 && e.invocationErr != nil {
+		errs = append(errs, e.invocationErr)
+	}
+	return errors.Join(errs...)
+}
+
+func (c Condition) valid() bool { return c >= OnSuccess && c <= OnComplete }
+
+func (c Condition) match(result Result) bool {
 	switch c {
 	case OnSuccess:
-		return r == ResultSuccess
+		return result == ResultSuccess
 	case OnFailure:
-		return r == ResultFailure
+		return result == ResultFailure
 	case OnSkipped:
-		return r == ResultSkipped
+		return result == ResultSkipped
 	case OnComplete:
-		return r != ResultPending
+		return result != ResultPending
 	default:
 		return false
 	}
 }
 
-// Dep is one DAG edge.
-type Dep struct {
-	Name string
-	When Condition
-}
-
-func After(name string, when Condition) Dep { return Dep{Name: name, When: when} }
-
-// Step is one node in the DAG. Exactly one of Job or Fn must be set.
-type Step struct {
-	Name    string
-	Job     cron.Job
-	Fn      StepFunc // alternative to Job; receives dependency outputs
-	Deps    []Dep
-	Timeout time.Duration    // per-run cap; zero means none
-	Retry   cron.RetryPolicy // per-run retry; zero means none
-}
-
-// Inputs holds dependency outputs keyed by step name. Plain-Job, failed, and
-// skipped dependencies yield nil.
-type Inputs map[string]any
-
-// StepFunc is a step body that consumes dependency outputs and produces its
-// own, letting data flow through the DAG.
-type StepFunc func(ctx context.Context, in Inputs) (any, error)
-
-func NewStep(name string, job cron.Job, deps ...Dep) Step {
-	return Step{Name: name, Job: job, Deps: deps}
-}
-
-// NewStepFunc is NewStep for a StepFunc whose output feeds dependent steps.
-func NewStepFunc(name string, fn StepFunc, deps ...Dep) Step {
-	return Step{Name: name, Fn: fn, Deps: deps}
-}
-
-// WithTimeout returns a copy of s capped at d per run, with cron.ErrJobTimeout
-// as the cancellation cause.
-func (s Step) WithTimeout(d time.Duration) Step {
-	s.Timeout = d
-	return s
-}
-
-// WithRetry returns a copy of s retried per p on error.
-func (s Step) WithRetry(p cron.RetryPolicy) Step {
-	s.Retry = p
-	return s
-}
-
-// Workflow is a DAG of Steps.
-type Workflow struct {
-	steps      map[string]Step
-	order      []string
-	onComplete func(*Execution)
-}
-
-// New constructs a Workflow. It copies Step.Deps and returns *ConfigError for
-// duplicate steps, unknown dependencies, or cycles.
-func New(steps ...Step) (*Workflow, error) {
-	w := &Workflow{
-		steps: make(map[string]Step, len(steps)),
-		order: make([]string, 0, len(steps)),
+func (b *Builder) init() {
+	if b.graph == nil {
+		b.graph = &graphID{}
 	}
-	for _, s := range steps {
-		if _, dup := w.steps[s.Name]; dup {
-			return nil, &ConfigError{Err: ErrDuplicateStep, Step: s.Name}
-		}
-		if s.Job == nil && s.Fn == nil {
-			return nil, &ConfigError{Err: ErrNilJob, Step: s.Name}
-		}
-		copied := s
-		if len(s.Deps) > 0 {
-			copied.Deps = append([]Dep(nil), s.Deps...)
-		}
-		w.steps[s.Name] = copied
-		w.order = append(w.order, s.Name)
+	if b.config.maxParallelism == 0 {
+		b.config.maxParallelism = defaultMaxParallelism
 	}
-	for _, name := range w.order {
-		for _, d := range w.steps[name].Deps {
-			if _, ok := w.steps[d.Name]; !ok {
-				return nil, &ConfigError{Err: ErrUnknownDep, Step: name, Dep: d.Name}
-			}
+}
+
+func (b *Builder) canMutate() bool {
+	b.init()
+	if !b.frozen {
+		return true
+	}
+	b.afterBuild = ErrBuilderFrozen
+	return false
+}
+
+func (b *Builder) add(s step, opts []StepOption) {
+	for i, option := range opts {
+		if option == nil {
+			b.errors = append(b.errors,
+				fmt.Errorf("%w: step %q option %d is nil", ErrInvalidOption, s.name, i))
+			continue
+		}
+		if err := option(&s); err != nil {
+			b.errors = append(b.errors, fmt.Errorf("step %q: %w", s.name, err))
 		}
 	}
-	if err := w.validateAcyclic(); err != nil {
+	b.steps = append(b.steps, s)
+}
+
+func (b *Builder) compile() (*Workflow, error) {
+	if err := errors.Join(b.errors...); err != nil {
 		return nil, err
 	}
-	return w, nil
-}
 
-// MustNew panics on configuration error.
-func MustNew(steps ...Step) *Workflow {
-	w, err := New(steps...)
-	if err != nil {
-		panic(err)
+	steps := make([]compiledStep, len(b.steps))
+	index := make(map[string]int, len(b.steps))
+	for i, source := range b.steps {
+		if source.name == "" || strings.TrimSpace(source.name) != source.name {
+			return nil, &ConfigError{Err: ErrInvalidName, Step: source.name}
+		}
+		if _, exists := index[source.name]; exists {
+			return nil, &ConfigError{Err: ErrDuplicateStep, Step: source.name}
+		}
+		index[source.name] = i
+		steps[i] = compiledStep{
+			name:    source.name,
+			run:     source.run,
+			timeout: source.timeout,
+			retry:   source.retry,
+			deps:    make([]compiledDependency, 0, len(source.deps)),
+		}
 	}
-	return w
-}
 
-func (w *Workflow) validateAcyclic() error {
-	const (
-		white = 0
-		gray  = 1
-		black = 2
-	)
-	color := make(map[string]int, len(w.steps))
-	var firstCycle *ConfigError
-	var visit func(name string)
-	visit = func(name string) {
-		color[name] = gray
-		for _, d := range w.steps[name].Deps {
-			switch color[d.Name] {
-			case gray:
-				firstCycle = &ConfigError{Err: ErrCycle, Step: name, Dep: d.Name}
-				return
-			case white:
-				visit(d.Name)
-				if firstCycle != nil {
-					return
-				}
+	for i, source := range b.steps {
+		seen := make(map[int]struct{}, len(source.deps))
+		for _, dep := range source.deps {
+			depIndex, exists := index[dep.name]
+			if dep.graph != b.graph || !exists {
+				return nil, &ConfigError{Err: ErrUnknownDep, Step: source.name, Dep: dep.name}
 			}
-		}
-		color[name] = black
-	}
-	for _, name := range w.order {
-		if color[name] == white {
-			visit(name)
-			if firstCycle != nil {
-				return firstCycle
+			if _, duplicate := seen[depIndex]; duplicate {
+				return nil, &ConfigError{Err: ErrDuplicateDep, Step: source.name, Dep: dep.name}
 			}
+			seen[depIndex] = struct{}{}
+			steps[i].deps = append(steps[i].deps, compiledDependency{
+				step: depIndex,
+				when: dep.when,
+			})
+			steps[depIndex].dependents = append(steps[depIndex].dependents, i)
 		}
 	}
-	return nil
-}
-
-// WithOnComplete returns a shallow copy with cb installed. cb runs before Run
-// returns.
-func (w *Workflow) WithOnComplete(cb func(*Execution)) *Workflow {
-	nw := *w
-	nw.onComplete = cb
-	return &nw
-}
-
-// StepReport is one step's outcome with timing and output.
-type StepReport struct {
-	Result    Result
-	Err       error
-	Output    any       // StepFunc return value; nil for plain Jobs
-	StartedAt time.Time // zero if the step never ran
-	Duration  time.Duration
-}
-
-// Execution is the result of one Workflow run.
-type Execution struct {
-	ID        string
-	StartedAt time.Time
-	Duration  time.Duration
-	Results   map[string]Result
-	Errors    map[string]error
-	Steps     map[string]StepReport
-}
-
-// Err joins recorded Step errors.
-func (e *Execution) Err() error {
-	var errs []error
-	for _, err := range e.Errors {
-		if err != nil {
-			errs = append(errs, err)
-		}
+	if cycle := findCycle(steps); len(cycle) != 0 {
+		return nil, fmt.Errorf("%w: %s", ErrCycle, strings.Join(cycle, " -> "))
 	}
-	return errors.Join(errs...)
-}
-
-// Run executes the DAG once and returns Execution.Err.
-func (w *Workflow) Run(ctx context.Context) error {
-	exec := w.execute(ctx)
-	if w.onComplete != nil {
-		w.onComplete(exec)
-	}
-	return exec.Err()
+	return &Workflow{
+		graph:          b.graph,
+		steps:          steps,
+		maxParallelism: b.config.maxParallelism,
+	}, nil
 }
 
 type stepState struct {
-	done      chan struct{}
 	result    Result
 	err       error
 	output    any
@@ -280,118 +639,124 @@ type stepState struct {
 	duration  time.Duration
 }
 
-func (w *Workflow) execute(ctx context.Context) *Execution {
-	begin := time.Now()
-	states := make(map[string]*stepState, len(w.steps))
-	for _, name := range w.order {
-		states[name] = &stepState{done: make(chan struct{})}
-	}
-
-	finalize := func(name string, result Result, err error) {
-		st := states[name]
-		st.result = result
-		st.err = err
-		close(st.done)
-	}
-
-	runStep := func(name string) {
-		if err := ctx.Err(); err != nil {
-			finalize(name, ResultSkipped, err)
-			return
-		}
-		s := w.steps[name]
-		for _, d := range s.Deps {
-			select {
-			case <-states[d.Name].done:
-			case <-ctx.Done():
-				finalize(name, ResultSkipped, ctx.Err())
-				return
-			}
-		}
-		for _, d := range s.Deps {
-			if !d.When.match(states[d.Name].result) {
-				finalize(name, ResultSkipped, nil)
-				return
-			}
-		}
-
-		st := states[name]
-		st.startedAt = time.Now()
-		var out any
-		err := func() (err error) {
-			defer func() {
-				if r := recover(); r != nil {
-					err = fmt.Errorf("workflow: step %q panicked: %v", name, r)
-				}
-			}()
-			runCtx := ctx
-			if s.Timeout > 0 {
-				var cancel context.CancelFunc
-				runCtx, cancel = context.WithTimeoutCause(ctx, s.Timeout, cron.ErrJobTimeout)
-				defer cancel()
-			}
-			job := s.Job
-			if s.Fn != nil {
-				in := make(Inputs, len(s.Deps))
-				for _, d := range s.Deps {
-					in[d.Name] = states[d.Name].output
-				}
-				job = cron.JobFunc(func(c context.Context) error {
-					o, err := s.Fn(c, in)
-					if err != nil {
-						return err
-					}
-					out = o
-					return nil
-				})
-			}
-			if !s.Retry.IsZero() {
-				job = s.Retry.Wrapper()(job)
-			}
-			return job.Run(runCtx)
-		}()
-		st.duration = time.Since(st.startedAt)
-		if err == nil {
-			st.output = out
-			finalize(name, ResultSuccess, nil)
-		} else {
-			finalize(name, ResultFailure, err)
-		}
-	}
-
-	for _, name := range w.order {
-		go runStep(name)
-	}
-	for _, st := range states {
-		<-st.done
-	}
-
-	exec := &Execution{
-		ID:        genID(),
-		StartedAt: begin,
-		Duration:  time.Since(begin),
-		Results:   make(map[string]Result, len(states)),
-		Errors:    make(map[string]error, len(states)),
-		Steps:     make(map[string]StepReport, len(states)),
-	}
-	for name, st := range states {
-		exec.Results[name] = st.result
-		if st.err != nil {
-			exec.Errors[name] = st.err
-		}
-		exec.Steps[name] = StepReport{
-			Result:    st.result,
-			Err:       st.err,
-			Output:    st.output,
-			StartedAt: st.startedAt,
-			Duration:  st.duration,
-		}
-	}
-	return exec
+type stepDone struct {
+	index     int
+	result    Result
+	err       error
+	output    any
+	startedAt time.Time
+	duration  time.Duration
 }
 
-func genID() string {
-	var b [16]byte
-	_, _ = crand.Read(b[:])
-	return hex.EncodeToString(b[:])
+func dependenciesMatch(step compiledStep, states []stepState) bool {
+	for _, dep := range step.deps {
+		if !dep.when.match(states[dep.step].result) {
+			return false
+		}
+	}
+	return true
+}
+
+func buildInputs(graph *graphID, step compiledStep, states []stepState, steps []compiledStep) Inputs {
+	inputs := Inputs{
+		graph:   graph,
+		allowed: make(map[string]struct{}, len(step.deps)),
+		values:  make(map[string]any, len(step.deps)),
+	}
+	for _, dep := range step.deps {
+		name := steps[dep.step].name
+		inputs.allowed[name] = struct{}{}
+		if states[dep.step].result == ResultSuccess {
+			inputs.values[name] = states[dep.step].output
+		}
+	}
+	return inputs
+}
+
+func runStep(ctx context.Context, index int, step compiledStep, inputs Inputs) (completed stepDone) {
+	completed.index = index
+	completed.result = ResultFailure
+	completed.startedAt = time.Now()
+	defer func() {
+		completed.duration = time.Since(completed.startedAt)
+		if recovered := recover(); recovered != nil {
+			completed.err = fmt.Errorf("workflow: step %q panicked: %v", step.name, recovered)
+		}
+	}()
+
+	runCtx := ctx
+	if step.timeout > 0 {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeoutCause(ctx, step.timeout, cron.ErrJobTimeout)
+		defer cancel()
+	}
+	var output any
+	var job cron.Job = cron.JobFunc(func(stepCtx context.Context) error {
+		value, err := step.run(stepCtx, inputs)
+		if err != nil {
+			return err
+		}
+		output = value
+		return nil
+	})
+	if !step.retry.IsZero() {
+		job = step.retry.Wrapper()(job)
+	}
+	if err := job.Run(runCtx); err != nil {
+		completed.err = err
+		return completed
+	}
+	completed.result = ResultSuccess
+	completed.output = output
+	return completed
+}
+
+func isNilLike(value any) bool {
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return rv.IsNil()
+	default:
+		return false
+	}
+}
+
+func findCycle(steps []compiledStep) []string {
+	colors := make([]uint8, len(steps))
+	positions := make([]int, len(steps))
+	for i := range positions {
+		positions[i] = -1
+	}
+	stack := make([]int, 0, len(steps))
+	var cycle []string
+	var visit func(int) bool
+	visit = func(index int) bool {
+		colors[index] = 1
+		positions[index] = len(stack)
+		stack = append(stack, index)
+		for _, dep := range steps[index].deps {
+			switch colors[dep.step] {
+			case 0:
+				if visit(dep.step) {
+					return true
+				}
+			case 1:
+				for _, member := range stack[positions[dep.step]:] {
+					cycle = append(cycle, steps[member].name)
+				}
+				cycle = append(cycle, steps[dep.step].name)
+				return true
+			}
+		}
+		stack = stack[:len(stack)-1]
+		positions[index] = -1
+		colors[index] = 2
+		return false
+	}
+	for i := range steps {
+		if colors[i] == 0 && visit(i) {
+			return cycle
+		}
+	}
+	return nil
 }

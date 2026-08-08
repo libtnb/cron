@@ -33,6 +33,20 @@ func TestValidateSpec_NilParser(t *testing.T) {
 	}
 }
 
+func TestValidateSpec_NilSchedule(t *testing.T) {
+	p := parserExtFunc(func(string) (Schedule, error) {
+		var schedule *typedNilInternalSchedule
+		return schedule, nil
+	})
+	if err := ValidateSpecWith("ignored", p); !errors.Is(err, ErrNilSchedule) {
+		t.Fatalf("error = %v, want ErrNilSchedule", err)
+	}
+	a := AnalyzeSpecWith("ignored", p, time.Now())
+	if a.Valid || !errors.Is(a.Err, ErrNilSchedule) {
+		t.Fatalf("Valid=%v Err=%v", a.Valid, a.Err)
+	}
+}
+
 func TestAnalyzeSpec_NilParser(t *testing.T) {
 	a := AnalyzeSpecWith("@hourly", nil, t0(2026, 1, 1, 0, 0, 0))
 	if a.Valid || a.Err == nil {

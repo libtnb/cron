@@ -5,6 +5,7 @@ import (
 	"fmt"
 )
 
+// Errors returned by scheduler configuration, lifecycle, and dispatch.
 var (
 	ErrCapacityReached     = errors.New("cron: capacity reached")
 	ErrAlreadyRunning      = errors.New("cron: job already running")
@@ -17,9 +18,10 @@ var (
 	ErrNilJob              = errors.New("cron: nil job")
 	ErrNilSchedule         = errors.New("cron: nil schedule")
 	ErrJobPanic            = errors.New("cron: job panicked")
-	ErrLockHeld            = errors.New("cron: fire lock held by another instance")
-	ErrNotLeader           = errors.New("cron: not leader")
-	ErrLockerRequiresName  = errors.New("cron: distributed locker requires WithName")
+	ErrClaimerRequiresKey  = errors.New("cron: distributed claimer requires WithKey")
+	ErrDuplicateKey        = errors.New("cron: duplicate entry key")
+	ErrNilContext          = errors.New("cron: nil context")
+	ErrInvalidOption       = errors.New("cron: invalid option")
 )
 
 // ParseError describes a failure parsing a cron specification.

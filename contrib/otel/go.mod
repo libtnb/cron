@@ -1,6 +1,6 @@
 module github.com/libtnb/cron/contrib/otel
 
-go 1.26.4
+go 1.27rc2
 
 require (
 	github.com/libtnb/cron v0.5.2

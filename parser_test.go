@@ -41,7 +41,7 @@ func TestParser_Standard5Field(t *testing.T) {
 }
 
 func TestParser_WithSeconds(t *testing.T) {
-	p := NewStandardParser(WithSeconds(), WithDefaultLocation(time.UTC))
+	p := NewStandardParser(WithOptionalSeconds(), WithDefaultLocation(time.UTC))
 	s, err := p.Parse("*/5 * * * * *")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -53,7 +53,7 @@ func TestParser_WithSeconds(t *testing.T) {
 }
 
 func TestParser_WithSeconds_AcceptsFiveFields(t *testing.T) {
-	p := NewStandardParser(WithSeconds(), WithDefaultLocation(time.UTC))
+	p := NewStandardParser(WithOptionalSeconds(), WithDefaultLocation(time.UTC))
 	s, err := p.Parse("*/5 * * * *")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -67,7 +67,7 @@ func TestParser_WithSeconds_AcceptsFiveFields(t *testing.T) {
 }
 
 func TestParser_WithSecondsFalseIsEquivalentToOptional(t *testing.T) {
-	p := NewStandardParser(WithSeconds(false), WithDefaultLocation(time.UTC))
+	p := NewStandardParser(WithOptionalSeconds(), WithDefaultLocation(time.UTC))
 	if _, err := p.Parse("0 0 * * *"); err != nil {
 		t.Fatalf("5-field should parse: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestParser_WithSecondsFalseIsEquivalentToOptional(t *testing.T) {
 }
 
 func TestParser_WithSecondsStrictRejectsFiveFields(t *testing.T) {
-	p := NewStandardParser(WithSeconds(true), WithDefaultLocation(time.UTC))
+	p := NewStandardParser(WithRequiredSeconds(), WithDefaultLocation(time.UTC))
 	_, err := p.Parse("*/5 * * * *")
 	if err == nil {
 		t.Fatal("strict mode should reject 5-field spec")
@@ -312,7 +312,7 @@ func TestParser_Ext_ErrorPropagated(t *testing.T) {
 }
 
 func TestParser_SecondsFieldErrors(t *testing.T) {
-	p := NewStandardParser(WithSeconds(), WithDefaultLocation(time.UTC))
+	p := NewStandardParser(WithOptionalSeconds(), WithDefaultLocation(time.UTC))
 	cases := []string{
 		"60 * * * * *", // second above 59
 		"* 60 * * * *", // minute above 59

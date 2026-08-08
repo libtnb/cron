@@ -17,6 +17,7 @@ func (id EntryID) LogValue() slog.Value { return slog.StringValue(id.String()) }
 type Entry struct {
 	ID       EntryID
 	Name     string
+	Key      string // stable identity for distributed fire claims
 	Spec     string // empty for AddSchedule entries
 	Schedule Schedule
 	Prev     time.Time // zero if never fired
@@ -24,30 +25,16 @@ type Entry struct {
 	Paused   bool
 }
 
-// Valid reports whether e refers to a registered entry. Zero is invalid.
+// Valid reports whether e has a non-zero entry ID.
 func (e Entry) Valid() bool { return e.ID != 0 }
-
-// EntryInfo identifies the running invocation inside a job's context.
-type EntryInfo struct {
-	ID          EntryID
-	Name        string
-	ScheduledAt time.Time
-}
-
-type entryInfoKey struct{}
-
-// EntryInfoFromContext returns the identity of the entry whose job is running
-// under ctx. The scheduler injects it for every dispatch, so wrappers and
-// jobs can tell which entry — and which fire — they serve.
-func EntryInfoFromContext(ctx context.Context) (EntryInfo, bool) {
-	info, ok := ctx.Value(entryInfoKey{}).(EntryInfo)
-	return info, ok
-}
 
 func (e Entry) LogValue() slog.Value {
 	attrs := []slog.Attr{slog.String("id", e.ID.String())}
 	if e.Name != "" {
 		attrs = append(attrs, slog.String("name", e.Name))
+	}
+	if e.Key != "" {
+		attrs = append(attrs, slog.String("key", e.Key))
 	}
 	if e.Spec != "" {
 		attrs = append(attrs, slog.String("spec", e.Spec))
@@ -62,4 +49,22 @@ func (e Entry) LogValue() slog.Value {
 		attrs = append(attrs, slog.Bool("paused", true))
 	}
 	return slog.GroupValue(attrs...)
+}
+
+// EntryInfo identifies the running invocation inside a job's context.
+type EntryInfo struct {
+	ID          EntryID
+	Name        string
+	Key         string
+	ScheduledAt time.Time
+}
+
+type entryInfoKey struct{}
+
+// EntryInfoFromContext returns the identity of the entry whose job is running
+// under ctx. The scheduler injects it for every dispatch, so wrappers and
+// jobs can tell which entry — and which fire — they serve.
+func EntryInfoFromContext(ctx context.Context) (EntryInfo, bool) {
+	info, ok := ctx.Value(entryInfoKey{}).(EntryInfo)
+	return info, ok
 }

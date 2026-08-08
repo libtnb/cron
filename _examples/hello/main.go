@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	c := cron.New(
+	c := cron.MustNew(
 		cron.WithLogger(slog.Default()),
 		cron.WithChain(wrap.Recover(), wrap.Timeout(30*time.Second)),
 	)

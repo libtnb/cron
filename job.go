@@ -1,6 +1,9 @@
 package cron
 
-import "context"
+import (
+	"context"
+	"slices"
+)
 
 // Job is the unit of work executed by the scheduler.
 type Job interface {
@@ -18,8 +21,8 @@ type Wrapper func(Job) Job
 // Chain composes wrappers so the first wraps outermost.
 func Chain(wrappers ...Wrapper) Wrapper {
 	return func(j Job) Job {
-		for i := len(wrappers) - 1; i >= 0; i-- {
-			j = wrappers[i](j)
+		for _, wrapper := range slices.Backward(wrappers) {
+			j = wrapper(j)
 		}
 		return j
 	}

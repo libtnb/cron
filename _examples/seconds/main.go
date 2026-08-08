@@ -12,9 +12,9 @@ import (
 )
 
 func main() {
-	c := cron.New(
+	c := cron.MustNew(
 		cron.WithLogger(slog.Default()),
-		cron.WithParser(cron.NewStandardParser(cron.WithSeconds())),
+		cron.WithParser(cron.NewStandardParser(cron.WithOptionalSeconds())),
 	)
 
 	if _, err := c.Add("*/5 * * * * *", cron.JobFunc(func(ctx context.Context) error {

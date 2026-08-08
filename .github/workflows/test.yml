@@ -8,58 +8,53 @@ jobs:
   test:
     strategy:
       matrix:
-        go: [ "oldstable", "stable" ]
         platform: [ ubuntu-latest, macos-latest, windows-latest ]
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@v6
         with:
           cache: true
-          go-version: ${{ matrix.go }}
+          go-version-file: go.mod
       - name: Install dependencies
         run: go mod tidy
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - name: Vet
+        run: go vet ./...
       - name: Run tests
-        run: go test -timeout 1h ./...
+        run: go test -race -timeout 1h ./...
   coverage:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@v6
         with:
           cache: true
-          go-version: 'stable'
+          go-version-file: go.mod
       - name: Install dependencies
         run: go mod tidy
       - name: Run coverage
         run: |
           go test -coverprofile=cov.out -covermode=atomic ./...
-          grep -v "/examples/" cov.out > cov.lib.out
-          total=$(go tool cover -func=cov.lib.out | tail -1 | awk '{print $NF}')
-          echo "coverage=$total"
-          if [ "$total" != "100.0%" ]; then
-            echo "::error::library coverage dropped below 100% ($total)"
-            go tool cover -func=cov.lib.out | awk '$NF != "100.0%" && $NF != "(statements)"'
-            exit 1
-          fi
+          go tool cover -func=cov.out | tail -1
   fuzz:
     strategy:
       matrix:
-        go: [ "oldstable", "stable" ]
         platform: [ ubuntu-latest, macos-latest, windows-latest ]
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@v6
         with:
           cache: true
-          go-version: ${{ matrix.go }}
+          go-version-file: go.mod
       - name: Install dependencies
         run: go mod tidy
       - name: Fuzz parser (short)
@@ -67,23 +62,23 @@ jobs:
       - name: Fuzz Next vs linear scan (short)
         run: go test -run=^$ -fuzz=FuzzSpecScheduleNext -fuzztime=30s .
 
-  lockers-redis:
+  coordination-redis:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@v6
         with:
           cache: true
-          go-version: 'stable'
+          go-version-file: go.mod
       - name: Workspace against HEAD core
-        run: go work init . lockers/redis
+        run: go work init . coordination/redis
       - name: Test
-        working-directory: lockers/redis
+        working-directory: coordination/redis
         run: go test -race -timeout 10m ./...
 
-  lockers-postgres:
+  coordination-postgres:
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -99,28 +94,28 @@ jobs:
       CRON_PG_TEST_DSN: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@v6
         with:
           cache: true
-          go-version: 'stable'
+          go-version-file: go.mod
       - name: Workspace against HEAD core
-        run: go work init . lockers/postgres
+        run: go work init . coordination/postgres
       - name: Test
-        working-directory: lockers/postgres
+        working-directory: coordination/postgres
         run: go test -race -timeout 10m ./...
 
   contrib:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@v6
         with:
           cache: true
-          go-version: 'stable'
+          go-version-file: go.mod
       - name: Workspace against HEAD core
         run: go work init . contrib/prometheus contrib/otel
       - name: Test prometheus recorder

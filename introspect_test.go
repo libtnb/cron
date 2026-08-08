@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -33,6 +34,9 @@ func TestNextN_ZeroOrNegative(t *testing.T) {
 	if got := NextN(s, time.Now(), -1); got != nil {
 		t.Fatalf("got %v", got)
 	}
+	if got := NextN(nil, time.Now(), 1); got != nil {
+		t.Fatalf("nil schedule: got %v", got)
+	}
 }
 
 func TestNextN_TerminatesWhenScheduleExhausts(t *testing.T) {
@@ -47,7 +51,7 @@ func TestBetween(t *testing.T) {
 	s := mustParse(t, "@hourly")
 	start := t0(2026, 1, 1, 0, 30, 0)
 	end := t0(2026, 1, 1, 5, 30, 0)
-	got := Between(s, start, end)
+	got := slices.Collect(Between(s, start, end))
 	if len(got) != 5 {
 		t.Fatalf("len = %d, want 5", len(got))
 	}
@@ -55,9 +59,16 @@ func TestBetween(t *testing.T) {
 
 func TestBetween_StartAfterEnd(t *testing.T) {
 	s := mustParse(t, "@hourly")
-	got := Between(s, t0(2026, 1, 2, 0, 0, 0), t0(2026, 1, 1, 0, 0, 0))
-	if got != nil {
+	got := slices.Collect(Between(s, t0(2026, 1, 2, 0, 0, 0), t0(2026, 1, 1, 0, 0, 0)))
+	if len(got) != 0 {
 		t.Fatalf("got %v", got)
+	}
+}
+
+func TestBetween_NilSchedule(t *testing.T) {
+	var nilSchedule *typedNilInternalSchedule
+	if got := slices.Collect(Between(nilSchedule, time.Now(), time.Now().Add(time.Hour))); len(got) != 0 {
+		t.Fatalf("typed-nil schedule yielded %v", got)
 	}
 }
 

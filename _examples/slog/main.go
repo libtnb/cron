@@ -16,7 +16,7 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
-	c := cron.New(cron.WithLogger(logger), cron.WithLocation(time.UTC))
+	c := cron.MustNew(cron.WithLogger(logger), cron.WithLocation(time.UTC))
 
 	id, err := c.Add("@every 2s", cron.JobFunc(func(ctx context.Context) error {
 		logger.LogAttrs(ctx, slog.LevelInfo, "ran",

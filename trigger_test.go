@@ -12,7 +12,7 @@ import (
 )
 
 func TestTriggerByName_NotRunning(t *testing.T) {
-	c := cron.New()
+	c := cron.MustNew()
 	got, err := c.TriggerByName("none")
 	if got != 0 || !errors.Is(err, cron.ErrSchedulerNotRunning) {
 		t.Fatalf("got %d, %v; want 0, ErrSchedulerNotRunning", got, err)
@@ -21,7 +21,7 @@ func TestTriggerByName_NotRunning(t *testing.T) {
 
 func TestTriggerByName_NoMatchIsNotError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		c := cron.New(cron.WithLocation(time.UTC))
+		c := cron.MustNew(cron.WithLocation(time.UTC))
 		_ = c.Start()
 		got, err := c.TriggerByName("nobody")
 		_ = c.Stop(context.Background())
@@ -33,7 +33,7 @@ func TestTriggerByName_NoMatchIsNotError(t *testing.T) {
 
 func TestTriggerByName_DispatchesMatching(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		c := cron.New(cron.WithLocation(time.UTC))
+		c := cron.MustNew(cron.WithLocation(time.UTC))
 		var called atomic.Int32
 		_, _ = c.AddSchedule(cron.TriggeredSchedule(),
 			cron.JobFunc(func(ctx context.Context) error { called.Add(1); return nil }),
@@ -62,7 +62,7 @@ func TestTriggerByName_DispatchesMatching(t *testing.T) {
 
 func TestTriggerByName_PartialFailureJoinsErrors(t *testing.T) {
 	release := make(chan struct{})
-	c := cron.New(cron.WithLocation(time.UTC), cron.WithMaxConcurrent(1))
+	c := cron.MustNew(cron.WithLocation(time.UTC), cron.WithMaxConcurrent(1))
 	for range 3 {
 		_, _ = c.AddSchedule(cron.TriggeredSchedule(),
 			cron.JobFunc(func(ctx context.Context) error { <-release; return nil }),
