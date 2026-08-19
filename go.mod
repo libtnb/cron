@@ -1,3 +1,3 @@
 module github.com/libtnb/cron
 
-go 1.27rc2
+go 1.27.0
