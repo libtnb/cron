@@ -3,7 +3,7 @@ module github.com/libtnb/cron/contrib/prometheus
 go 1.27.0
 
 require (
-	github.com/libtnb/cron v0.5.3
+	github.com/libtnb/cron v0.5.4
 	github.com/prometheus/client_golang v1.24.1
 )
 
