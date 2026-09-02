@@ -1,0 +1,163 @@
+# cron
+
+> Context-aware Go job scheduler with explicit lifecycle control, missed-fire policies, typed workflows and optional distributed coordination.
+
+## Overview
+
+github.com/libtnb/cron schedules Go jobs from cron expressions or programmatic schedules. It is a library, not a binary, for services that need reliable periodic work: jobs receive a cancellable context, late fires are handled by an explicit policy, events feed metrics and tracing, and replicas can coordinate through Redis or PostgreSQL so each fire runs once. Requires Go 1.27.
+
+## Quick Start
+
+```bash
+go get github.com/libtnb/cron
+```
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/libtnb/cron"
+)
+
+func main() {
+	c := cron.MustNew(cron.WithLocation(time.UTC))
+	_, err := c.Add("*/5 * * * *", cron.JobFunc(func(ctx context.Context) error {
+		fmt.Println("tick")
+		return nil
+	}), cron.WithName("tick"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := c.Start(); err != nil {
+		log.Fatal(err)
+	}
+	time.Sleep(time.Minute)
+	if err := c.Stop(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+## Key Concepts
+
+- **Cron**: the scheduler. `New` builds it, `Add` / `AddSchedule` register entries, `Start` runs the loop, `Stop` cancels jobs and waits, `Drain` waits without cancelling. A stopped Cron cannot be restarted. All methods are safe for concurrent use.
+- **Entry**: one registration identified by a stable `EntryID`. Entries can be paused, resumed, updated, removed, triggered and inspected; `Entry` values are immutable snapshots.
+- **Schedule**: `Next(now time.Time) time.Time` returns the first firing strictly after `now`, or zero when exhausted. It must be safe for concurrent use. Built-in: `SpecSchedule` (parsed cron expressions), `ConstantDelay`, `AlignedDelay`, `OnceAt`, `TriggeredSchedule`, `Union`, `Filter`.
+- **Job**: `Run(ctx context.Context) error`. The context is cancelled by `Stop` (cause `ErrCronStopping`), `WithTimeout` (cause `ErrJobTimeout`) or the `WithBaseContext` parent, and carries `EntryInfo`.
+- **Missed-fire policy**: applied when a fire runs later than `WithMissedTolerance` (default one minute). `MissedRunOnce` (default) runs the most recent missed instant, `MissedRunAll` replays the newest 1000, `MissedSkip` drops them. `WithLastRun` seeds the anchor for catch-up after a restart.
+- **Distributed coordination**: `Claimer` (one replica per keyed fire; keys combine `WithKey` with the UTC instant) and `Elector` (leader-only fires). `false, nil` is the normal contention or follower state; errors fail closed. Manual triggers bypass both.
+- **Events**: typed `Event` values delivered asynchronously to `Observer`s through a bounded, lossy queue and inline to one `Recorder`.
+- **Workflow**: `workflow.Builder` assembles a typed DAG of steps; `Build` freezes it into a `Workflow` that implements `cron.Job`.
+
+## API Reference
+
+### Core Functions
+
+- `New(opts ...Option) (*Cron, error)` / `MustNew(opts ...Option) *Cron` - build a scheduler; options are validated and failures wrap `ErrInvalidOption`.
+- `(*Cron).Add(spec string, j Job, opts ...EntryOption) (EntryID, error)` - parse and register; returns `*ParseError`, `ErrNilJob`, `ErrCapacityReached`, `ErrDuplicateKey` or `ErrClaimerRequiresKey`.
+- `(*Cron).AddSchedule(s Schedule, j Job, opts ...EntryOption) (EntryID, error)` - register a programmatic schedule.
+- `(*Cron).Start() error` - launch the loop; `ErrSchedulerStopped` after `Stop` or `Drain`.
+- `(*Cron).Stop(ctx context.Context) error` / `(*Cron).Drain(ctx context.Context) error` - shut down; `ctx.Err()` when the wait times out.
+- `(*Cron).Remove(id EntryID) error` / `Pause(id) error` / `Resume(id) error` - `ErrEntryNotFound` for unknown IDs.
+- `(*Cron).Update(id EntryID, spec string) error` / `UpdateSchedule(id EntryID, s Schedule) error` - swap the schedule, keep job, options and Prev.
+- `(*Cron).Trigger(id EntryID) error` / `TriggerAndWait(ctx, id) error` / `TriggerByName(name string) (int, error)` - fire now, bypassing jitter and coordination; `ErrSchedulerNotRunning`, `ErrConcurrencyLimit`.
+- `(*Cron).Entry(id EntryID) (Entry, bool)` / `(*Cron).Entries() iter.Seq[Entry]` - snapshots ordered by next fire.
+- `ValidateSpec(spec string) error` / `AnalyzeSpec(spec string, now time.Time) SpecAnalysis` - check specs with the built-in five-field parser; `ValidateSpecWith` and `AnalyzeSpecWith` take a `Parser`.
+- `NextN(s Schedule, from time.Time, n int) []time.Time` / `Between(s Schedule, start, end time.Time) iter.Seq[time.Time]` - enumerate firings.
+- `NewStandardParser(opts ...ParserOption) *StandardParser` - standalone parser; options `WithOptionalSeconds`, `WithRequiredSeconds`, `WithDefaultLocation`, `WithParserExt`.
+- `Retry(maxRetries int, opts ...RetryOption) RetryPolicy` - exponential backoff policy for `WithRetry` / `WithEntryRetry`; options `RetryInitial`, `RetryMaxDelay`, `RetryMultiplier`, `RetryJitterFrac`.
+- `Chain(wrappers ...Wrapper) Wrapper` - compose wrappers, first outermost.
+- `EntryInfoFromContext(ctx context.Context) (EntryInfo, bool)` - identify the running entry inside a job.
+- `ConstantDelay(d)`, `AlignedDelay(d)`, `OnceAt(t)`, `TriggeredSchedule()`, `Union(schedules...)`, `Filter(s, keep)` - programmatic schedules.
+
+### Core Types
+
+- `Cron` - the scheduler.
+- `Entry` - read-only snapshot: `ID`, `Name`, `Key`, `Spec`, `Schedule`, `Prev`, `Next`, `Paused`.
+- `Schedule`, `Parser`, `Upcoming` - extension interfaces.
+- `Job`, `JobFunc`, `Wrapper` - work units and decorators.
+- `Option` - `WithLocation`, `WithSecondsField`, `WithParser`, `WithLogger`, `WithChain`, `WithJitter`, `WithObservers`, `WithObserverBuffer`, `WithRecorder`, `WithMissedFire`, `WithMissedTolerance`, `WithMaxConcurrent`, `WithMaxEntries`, `WithRetry`, `WithoutRecover`, `WithBaseContext`, `WithClaimer`, `WithElector`.
+- `EntryOption` - `WithName`, `WithKey`, `WithTimeout`, `WithEntryChain`, `WithEntryRetry`, `WithEntryMissedFire`, `WithEntryJitter`, `WithLastRun`, `WithEntryClaimer`.
+- `MissedFirePolicy` - `MissedRunOnce`, `MissedSkip`, `MissedRunAll`.
+- `Claimer`, `Elector`, `SkipReason` - distributed coordination.
+- `Event` and its concrete types `ScheduleEvent`, `JobStartEvent`, `JobCompleteEvent`, `MissedFireEvent`, `RejectedFireEvent`, `CanceledFireEvent`, `SkippedFireEvent`, `QueueDepthEvent`, `ObserverDropEvent`; sinks `Observer` / `ObserverFunc` and `Recorder` / `RecorderFunc`.
+- `ParseError` - `Spec`, `Field`, `Pos`, `Reason`, `Err` of a rejected spec.
+- `RetryPolicy` - `MaxRetries`, `Initial`, `MaxDelay`, `Multiplier`, `JitterFrac`.
+- `SpecAnalysis` - `Valid`, `Err`, `IsTriggered`, `Descriptor`, `Interval`, `Location`, `NextRun`.
+
+### Subpackages
+
+- `github.com/libtnb/cron/workflow` - `New(opts ...Option) *Builder`, `(*Builder).Step[T](name, fn, opts...) Output[T]`, `(*Builder).Job(name, job, opts...) Output[Unit]`, `After(output, condition)`, `WithTimeout`, `WithRetry`, `WithMaxParallelism`, `(*Builder).Build() (*Workflow, error)`, `(*Workflow).Execute(ctx) *Execution`, `(*Execution).Get(output)`.
+- `github.com/libtnb/cron/wrap` - `Recover(opts...)`, `Timeout(d)`, `Retry(policy)`, `SkipIfRunning()`, `DelayIfRunning()`.
+- `github.com/libtnb/cron/parserext` - `NewQuartzParser(loc *time.Location) cron.Parser` with Quartz tokens `L`, `L-n`, `LW`, `nW`, `N#M`, `NL`.
+- Separate modules: `github.com/libtnb/cron/coordination/redis` and `.../coordination/postgres` (Claimer and Elector), `github.com/libtnb/cron/contrib/prometheus` (Recorder), `github.com/libtnb/cron/contrib/otel` (tracing Wrapper).
+
+## Common Patterns
+
+### Graceful shutdown
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+if err := c.Stop(ctx); err != nil { // or c.Drain(ctx) to let jobs finish
+	log.Printf("shutdown timed out: %v", err)
+}
+```
+
+### Catching up after a restart
+
+```go
+_, err := c.Add("0 * * * *", job,
+	cron.WithLastRun(lastRunFromStore),          // anchor at the persisted last run
+	cron.WithEntryMissedFire(cron.MissedRunAll), // replay every missed hour
+)
+```
+
+### One replica per fire
+
+```go
+c := cron.MustNew(cron.WithClaimer(claimer)) // e.g. rediscoord.NewClaimer(client)
+_, err := c.Add("0 * * * *", job, cron.WithKey("hourly-report"))
+```
+
+### Typed workflow
+
+```go
+b := workflow.New()
+fetch := b.Step[int]("fetch", func(ctx context.Context, _ workflow.Inputs) (int, error) {
+	return 42, nil
+})
+b.Step[string]("store", func(ctx context.Context, in workflow.Inputs) (string, error) {
+	n, _ := in.Get(fetch)
+	return fmt.Sprint(n), nil
+}, workflow.After(fetch, workflow.OnSuccess))
+wf := b.MustBuild()
+_, err := c.Add("0 2 * * *", wf)
+```
+
+## Error Handling
+
+- `ErrEntryNotFound` - `Remove`, `Pause`, `Resume`, `Update`, `Trigger` on an unknown or removed ID; check the ID, do not retry.
+- `ErrSchedulerNotRunning` - `Trigger` before `Start` or after `Stop`; start the scheduler first.
+- `ErrSchedulerStopped` - `Start` after `Stop` or `Drain`; build a new `Cron`.
+- `ErrConcurrencyLimit` - `Trigger` while `WithMaxConcurrent` is exhausted; retry later.
+- `ErrCapacityReached` - `Add` beyond `WithMaxEntries`.
+- `ErrDuplicateKey` / `ErrClaimerRequiresKey` - fix the `WithKey` configuration.
+- `ErrNilJob` / `ErrNilSchedule` / `ErrNilContext` - programming errors; a typed nil is detected too.
+- `ErrInvalidOption` - wrapped by `New` and `Add` for rejected options.
+- `*ParseError` - invalid spec; inspect `Field`, `Pos` and `Reason` with `errors.As`.
+- `ErrJobTimeout` / `ErrCronStopping` - context cancellation causes inside jobs; read with `context.Cause(ctx)`.
+- `ErrJobPanic` - wraps a recovered panic in `JobCompleteEvent.Err` and `TriggerAndWait`.
+- `ErrAlreadyRunning` - returned by `wrap.SkipIfRunning` for an overlapping invocation.
+
+## References
+
+- Documentation: https://pkg.go.dev/github.com/libtnb/cron
+- Repository: https://github.com/libtnb/cron
+- Go Reference: https://pkg.go.dev/github.com/libtnb/cron
+- Issues: https://github.com/libtnb/cron/issues

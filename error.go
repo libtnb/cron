@@ -5,34 +5,67 @@ import (
 	"fmt"
 )
 
-// Errors returned by scheduler configuration, lifecycle, and dispatch.
+// Sentinel errors. They may be returned wrapped; match them with errors.Is.
 var (
-	ErrCapacityReached     = errors.New("cron: capacity reached")
-	ErrAlreadyRunning      = errors.New("cron: job already running")
-	ErrJobTimeout          = errors.New("cron: job timeout")
-	ErrCronStopping        = errors.New("cron: scheduler stopping")
-	ErrEntryNotFound       = errors.New("cron: entry not found")
+	// ErrCapacityReached is returned by Add and AddSchedule when the
+	// WithMaxEntries limit is reached.
+	ErrCapacityReached = errors.New("cron: capacity reached")
+	// ErrAlreadyRunning is returned by wrap.SkipIfRunning when an invocation
+	// overlaps one still in progress.
+	ErrAlreadyRunning = errors.New("cron: job already running")
+	// ErrJobTimeout is the context cancellation cause when WithTimeout or
+	// wrap.Timeout expires; read it with context.Cause.
+	ErrJobTimeout = errors.New("cron: job timeout")
+	// ErrCronStopping is the context cancellation cause for jobs cancelled by
+	// Stop; read it with context.Cause.
+	ErrCronStopping = errors.New("cron: scheduler stopping")
+	// ErrEntryNotFound is returned by Remove, Pause, Resume, Update,
+	// UpdateSchedule, Trigger and TriggerAndWait for an unknown or removed id.
+	ErrEntryNotFound = errors.New("cron: entry not found")
+	// ErrSchedulerNotRunning is returned by Trigger, TriggerAndWait and
+	// TriggerByName before Start or after Stop and Drain.
 	ErrSchedulerNotRunning = errors.New("cron: scheduler not running")
-	ErrConcurrencyLimit    = errors.New("cron: max concurrent reached")
-	ErrSchedulerStopped    = errors.New("cron: scheduler stopped")
-	ErrNilJob              = errors.New("cron: nil job")
-	ErrNilSchedule         = errors.New("cron: nil schedule")
-	ErrJobPanic            = errors.New("cron: job panicked")
-	ErrClaimerRequiresKey  = errors.New("cron: distributed claimer requires WithKey")
-	ErrDuplicateKey        = errors.New("cron: duplicate entry key")
-	ErrNilContext          = errors.New("cron: nil context")
-	ErrInvalidOption       = errors.New("cron: invalid option")
+	// ErrConcurrencyLimit is returned by Trigger when WithMaxConcurrent has no
+	// free slot. Automatic fires publish RejectedFireEvent instead.
+	ErrConcurrencyLimit = errors.New("cron: max concurrent reached")
+	// ErrSchedulerStopped is returned by Start after Stop or Drain.
+	ErrSchedulerStopped = errors.New("cron: scheduler stopped")
+	// ErrNilJob is returned by Add and AddSchedule for a nil Job, including a
+	// typed nil, or when the wrapper chain produced one.
+	ErrNilJob = errors.New("cron: nil job")
+	// ErrNilSchedule is returned when a Parser produces no Schedule or when
+	// AddSchedule or UpdateSchedule receives a nil one.
+	ErrNilSchedule = errors.New("cron: nil schedule")
+	// ErrJobPanic wraps the recovered panic value in a job's result unless
+	// WithoutRecover is set.
+	ErrJobPanic = errors.New("cron: job panicked")
+	// ErrClaimerRequiresKey is returned by Add and AddSchedule when a Claimer
+	// applies to an entry registered without WithKey.
+	ErrClaimerRequiresKey = errors.New("cron: distributed claimer requires WithKey")
+	// ErrDuplicateKey is returned, wrapped with the key, when WithKey repeats
+	// a key already registered in this scheduler.
+	ErrDuplicateKey = errors.New("cron: duplicate entry key")
+	// ErrNilContext is returned by Stop, Drain and TriggerAndWait for a nil
+	// context.
+	ErrNilContext = errors.New("cron: nil context")
+	// ErrInvalidOption is wrapped by New, Add and AddSchedule when an Option,
+	// an EntryOption, or its argument is invalid.
+	ErrInvalidOption = errors.New("cron: invalid option")
 )
 
-// ParseError describes a failure parsing a cron specification.
+// ParseError describes why a cron specification was rejected. It is returned
+// as *ParseError by StandardParser.Parse, the parserext parsers, and through
+// them by Add, Update, ValidateSpec and AnalyzeSpec; match it with errors.As.
 type ParseError struct {
-	Spec   string
-	Field  string // e.g. "minute"; "" if not applicable
+	Spec   string // the specification being parsed
+	Field  string // "second", "minute", "hour", "dom", "month", "dow", "@every", "TZ" or "CRON_TZ"; "" if not applicable
 	Pos    int    // 0-based byte offset; -1 if unknown
-	Reason string
-	Err    error
+	Reason string // human-readable cause
+	Err    error  // underlying error, if any (for example from time.LoadLocation)
 }
 
+// Error formats the spec together with whichever of Field and Pos are known,
+// for example: cron: parse "61 * * * *": field "minute": 61 above maximum 59.
 func (e *ParseError) Error() string {
 	switch {
 	case e.Field != "" && e.Pos >= 0:
@@ -46,4 +79,6 @@ func (e *ParseError) Error() string {
 	}
 }
 
+// Unwrap exposes the underlying error, such as a time.LoadLocation failure,
+// to errors.Is and errors.As.
 func (e *ParseError) Unwrap() error { return e.Err }

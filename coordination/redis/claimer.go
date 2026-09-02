@@ -40,7 +40,8 @@ type claimerConfig struct {
 // ClaimerOption configures a Claimer.
 type ClaimerOption func(*claimerConfig) error
 
-// WithClaimTTL overrides DefaultClaimTTL.
+// WithClaimTTL overrides DefaultClaimTTL. A ttl below one millisecond is
+// rejected.
 func WithClaimTTL(ttl time.Duration) ClaimerOption {
 	return func(config *claimerConfig) error {
 		if ttl < time.Millisecond {
@@ -59,7 +60,8 @@ func WithClaimPrefix(prefix string) ClaimerOption {
 	}
 }
 
-// NewClaimer constructs a Redis fire Claimer.
+// NewClaimer constructs a Redis fire Claimer. It returns an error for a nil
+// client, a nil option, or an option that rejects its argument.
 func NewClaimer(client redis.UniversalClient, opts ...ClaimerOption) (*Claimer, error) {
 	if client == nil || isNilLike(client) {
 		return nil, fmt.Errorf("rediscoord: nil client")
@@ -76,8 +78,10 @@ func NewClaimer(client redis.UniversalClient, opts ...ClaimerOption) (*Claimer, 
 	return &Claimer{client: client, ttl: config.ttl, prefix: config.prefix}, nil
 }
 
-// Claim reserves fireKey until its TTL. false, nil means it was already
-// claimed by another scheduler instance.
+// Claim reserves fireKey with SET NX until the TTL expires. false, nil means
+// another scheduler instance already holds it. A nil ctx or an empty key is
+// rejected; Redis failures are returned wrapped, so the scheduler skips the
+// fire with cron.SkipClaimError.
 func (c *Claimer) Claim(ctx context.Context, fireKey string) (bool, error) {
 	if ctx == nil {
 		return false, fmt.Errorf("rediscoord: nil claim context")

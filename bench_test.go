@@ -61,7 +61,7 @@ func BenchmarkAdd_AtSize(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				id, _ := c.Add("@every 1m", noopJob{})
-				c.Remove(id)
+				_ = c.Remove(id)
 			}
 		})
 	}

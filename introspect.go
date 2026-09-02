@@ -5,7 +5,10 @@ import (
 	"time"
 )
 
-// NextN returns the next n firings strictly after from.
+// NextN returns up to n firings of s strictly after from, in order; fewer are
+// returned when the schedule exhausts first. It returns nil when s is nil or n
+// is not positive. Schedules implementing Upcoming are iterated lazily; others
+// are walked with repeated Next calls.
 func NextN(s Schedule, from time.Time, n int) []time.Time {
 	if isNilLike(s) || n <= 0 {
 		return nil
@@ -20,7 +23,9 @@ func NextN(s Schedule, from time.Time, n int) []time.Time {
 	return out
 }
 
-// Between lazily yields every firing in (start, end].
+// Between lazily yields every firing of s in (start, end], in order. The
+// sequence is empty when s is nil or end is not after start. Iteration stops
+// at the first firing after end, so an unbounded schedule is safe to query.
 func Between(s Schedule, start, end time.Time) iter.Seq[time.Time] {
 	return func(yield func(time.Time) bool) {
 		if isNilLike(s) || !end.After(start) {
@@ -34,9 +39,8 @@ func Between(s Schedule, start, end time.Time) iter.Seq[time.Time] {
 	}
 }
 
-// upcomingSeq is a lazy iterator over firings strictly after from. Uses
-// Schedule's Upcoming if it implements that interface, otherwise loops
-// Schedule.Next.
+// upcomingSeq is a lazy iterator over firings strictly after from. It uses
+// the schedule's Upcoming when implemented and otherwise loops Schedule.Next.
 func upcomingSeq(s Schedule, from time.Time) iter.Seq[time.Time] {
 	if up, ok := s.(Upcoming); ok {
 		return up.Upcoming(from)

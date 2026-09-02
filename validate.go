@@ -6,25 +6,33 @@ import (
 	"time"
 )
 
-// SpecAnalysis is the result of AnalyzeSpec. Most fields are populated
-// only when Valid is true.
+// defaultParser backs ValidateSpec and AnalyzeSpec: five fields, time.Local.
+var defaultParser = NewStandardParser()
+
+// SpecAnalysis is the result of AnalyzeSpec. When Valid is false only Spec and
+// Err are meaningful.
 type SpecAnalysis struct {
 	Spec        string
 	Valid       bool
-	Err         error
-	IsTriggered bool
-	Descriptor  string         // "@every", "@hourly", ... or "" for 5/6-field specs
+	Err         error          // *ParseError or ErrNilSchedule when Valid is false
+	IsTriggered bool           // the spec parsed to TriggeredSchedule (custom parsers only)
+	Descriptor  string         // "@every", "@hourly", ... or "" for field specs
 	Interval    time.Duration  // set when Descriptor == "@every"
-	Location    *time.Location // schedule timezone
-	NextRun     time.Time      // upcoming firing relative to the now passed in
+	Location    *time.Location // schedule time zone when the Schedule exposes one; nil otherwise
+	NextRun     time.Time      // first firing after the now passed in; zero if none or IsTriggered
 }
 
-// ValidateSpec checks spec with the standard parser.
+// ValidateSpec checks spec against the built-in five-field parser in
+// time.Local; use ValidateSpecWith to match a scheduler configured with
+// WithSecondsField or WithParser. Returns a *ParseError describing the fault,
+// or nil.
 func ValidateSpec(spec string) error {
 	return ValidateSpecWith(spec, defaultParser)
 }
 
-// ValidateSpecWith checks spec with p.
+// ValidateSpecWith checks spec with p. Returns p's error (a *ParseError for
+// the built-in parsers), ErrNilSchedule when p returns no schedule, or an
+// error for a nil p.
 func ValidateSpecWith(spec string, p Parser) error {
 	if isNilLike(p) {
 		return errors.New("cron: nil parser")
@@ -39,12 +47,16 @@ func ValidateSpecWith(spec string, p Parser) error {
 	return nil
 }
 
-// AnalyzeSpec describes spec relative to now using the standard parser.
+// AnalyzeSpec describes spec relative to now using the built-in five-field
+// parser in time.Local. It never fails: a rejected spec is reported through
+// SpecAnalysis.Valid and Err. Use AnalyzeSpecWith to match a custom parser.
 func AnalyzeSpec(spec string, now time.Time) SpecAnalysis {
 	return AnalyzeSpecWith(spec, defaultParser, now)
 }
 
-// AnalyzeSpecWith describes spec relative to now using p.
+// AnalyzeSpecWith describes spec relative to now using p. Location is set
+// when the Schedule has a Location() *time.Location method, as SpecSchedule
+// and parserext.QuartzSchedule do.
 func AnalyzeSpecWith(spec string, p Parser, now time.Time) SpecAnalysis {
 	res := SpecAnalysis{Spec: spec}
 	if isNilLike(p) {
@@ -65,10 +77,7 @@ func AnalyzeSpecWith(spec string, p Parser, now time.Time) SpecAnalysis {
 	res.Descriptor = extractDescriptor(spec)
 
 	if v, ok := s.(ConstantDelay); ok {
-		// Report the effective interval: ConstantDelay enforces a 1s floor, so a
-		// sub-second @every fires every 1s. Reporting the raw duration would
-		// contradict the actual cadence.
-		res.Interval = max(time.Duration(v), time.Second)
+		res.Interval = time.Duration(v)
 	}
 	// Duck-typed so validate.go does not import parserext.
 	type locationProvider interface{ Location() *time.Location }
@@ -82,8 +91,8 @@ func AnalyzeSpecWith(spec string, p Parser, now time.Time) SpecAnalysis {
 	return res
 }
 
-var defaultParser = NewStandardParser()
-
+// extractDescriptor returns the "@word" that starts spec after any TZ=/CRON_TZ=
+// prefix, or "" for field specs.
 func extractDescriptor(spec string) string {
 	s := strings.TrimSpace(spec)
 	if i := strings.IndexByte(s, ' '); i > 0 {

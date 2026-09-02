@@ -40,7 +40,7 @@ func WithNamespace(ns string) Option {
 }
 
 // WithRegisterer sets where collectors register. Default
-// prometheus.DefaultRegisterer.
+// prometheus.DefaultRegisterer. A nil r is rejected.
 func WithRegisterer(r prometheus.Registerer) Option {
 	return func(c *config) error {
 		if nilLike(r) {
@@ -51,7 +51,8 @@ func WithRegisterer(r prometheus.Registerer) Option {
 	}
 }
 
-// WithDurationBuckets overrides the job duration histogram buckets.
+// WithDurationBuckets overrides the job duration histogram buckets (seconds).
+// Buckets must be finite, positive and strictly increasing.
 func WithDurationBuckets(b []float64) Option {
 	return func(c *config) error {
 		if err := validateBuckets(b); err != nil {
@@ -62,7 +63,8 @@ func WithDurationBuckets(b []float64) Option {
 	}
 }
 
-// WithLatenessBuckets overrides the missed-fire lateness histogram buckets.
+// WithLatenessBuckets overrides the missed-fire lateness histogram buckets
+// (seconds). Buckets must be finite, positive and strictly increasing.
 func WithLatenessBuckets(b []float64) Option {
 	return func(c *config) error {
 		if err := validateBuckets(b); err != nil {
@@ -89,8 +91,10 @@ type Recorder struct {
 	collectors []prometheus.Collector
 }
 
-// New builds and registers a Recorder. It returns the registration error if
-// any collector clashes with an existing one.
+// New builds and registers a Recorder; install the result with
+// cron.WithRecorder. It returns an error wrapping ErrInvalidOption for a nil
+// or rejected option, and the registration error if any collector clashes
+// with an existing one.
 func New(opts ...Option) (*Recorder, error) {
 	cfg := config{
 		namespace:       "cron",
@@ -179,8 +183,9 @@ func (r *Recorder) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
-// Record implements cron.Recorder. Job names become label values, so callers
-// should keep them low-cardinality.
+// Record implements cron.Recorder and is safe for concurrent use. Job names
+// become label values, so callers should keep them low-cardinality; entries
+// without a name share the empty label.
 func (r *Recorder) Record(raw cron.Event) {
 	switch event := raw.(type) {
 	case cron.ScheduleEvent:

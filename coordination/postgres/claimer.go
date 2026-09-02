@@ -37,7 +37,7 @@ type claimerConfig struct {
 // ClaimerOption configures a Claimer.
 type ClaimerOption func(*claimerConfig) error
 
-// WithClaimTTL overrides DefaultClaimTTL.
+// WithClaimTTL overrides DefaultClaimTTL. A non-positive ttl is rejected.
 func WithClaimTTL(ttl time.Duration) ClaimerOption {
 	return func(config *claimerConfig) error {
 		if ttl <= 0 {
@@ -48,7 +48,8 @@ func WithClaimTTL(ttl time.Duration) ClaimerOption {
 	}
 }
 
-// WithClaimsTable overrides DefaultClaimsTable.
+// WithClaimsTable overrides DefaultClaimsTable. The name must be a plain or
+// schema-qualified SQL identifier; anything else is rejected.
 func WithClaimsTable(table string) ClaimerOption {
 	return func(config *claimerConfig) error {
 		if err := validateIdentifier(table); err != nil {
@@ -60,7 +61,9 @@ func WithClaimsTable(table string) ClaimerOption {
 }
 
 // NewClaimer constructs a Postgres fire Claimer. The claims table must exist;
-// see Migrate. The driver must support sql.Result.RowsAffected.
+// see Migrate. The driver must support sql.Result.RowsAffected. It returns an
+// error for a nil db, a nil option, an option that rejects its argument, or a
+// failure of the system random source.
 func NewClaimer(db *sql.DB, opts ...ClaimerOption) (*Claimer, error) {
 	if db == nil {
 		return nil, fmt.Errorf("postgrescoord: nil database")
@@ -92,8 +95,11 @@ ON CONFLICT (fire_key) DO UPDATE
 	return c, nil
 }
 
-// Claim reserves fireKey until its server-side TTL. false, nil means another
-// scheduler instance already claimed it.
+// Claim reserves fireKey until its server-side TTL, replacing an expired
+// claim for the same key atomically. false, nil means another scheduler
+// instance already holds it. Each call is bounded by a five-second statement
+// timeout. A nil ctx or an empty key is rejected; database failures are
+// returned wrapped, so the scheduler skips the fire with cron.SkipClaimError.
 func (c *Claimer) Claim(ctx context.Context, fireKey string) (bool, error) {
 	if ctx == nil {
 		return false, fmt.Errorf("postgrescoord: nil claim context")
@@ -115,7 +121,8 @@ func (c *Claimer) Claim(ctx context.Context, fireKey string) (bool, error) {
 }
 
 // Cleanup deletes claims that have been expired for over one minute. Run it
-// periodically when long-term claim history is not needed.
+// periodically when long-term claim history is not needed. A nil ctx is
+// rejected; the statement is bounded by a five-second timeout.
 func (c *Claimer) Cleanup(ctx context.Context) error {
 	if ctx == nil {
 		return fmt.Errorf("postgrescoord: nil cleanup context")

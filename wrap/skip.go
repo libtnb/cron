@@ -7,7 +7,10 @@ import (
 	"github.com/libtnb/cron"
 )
 
-// SkipIfRunning drops overlapping invocations.
+// SkipIfRunning drops an invocation that overlaps a running one, returning
+// cron.ErrAlreadyRunning without calling the job. State is created when the
+// wrapper is applied at Add time, so one value installed with cron.WithChain
+// still tracks each entry separately.
 func SkipIfRunning() cron.Wrapper {
 	return func(j cron.Job) cron.Job {
 		var running atomic.Bool

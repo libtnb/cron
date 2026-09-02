@@ -63,11 +63,11 @@ func TestCron_Remove(t *testing.T) {
 	c := cron.MustNew(cron.WithLocation(time.UTC))
 	keep, _ := c.Add("@every 2m", cron.JobFunc(noop))
 	id, _ := c.Add("@every 1m", cron.JobFunc(noop))
-	if !c.Remove(id) {
-		t.Fatal("Remove returned false")
+	if err := c.Remove(id); err != nil {
+		t.Fatalf("Remove: %v", err)
 	}
-	if c.Remove(id) {
-		t.Fatal("second Remove should return false")
+	if err := c.Remove(id); !errors.Is(err, cron.ErrEntryNotFound) {
+		t.Fatalf("second Remove = %v, want ErrEntryNotFound", err)
 	}
 	if _, ok := c.Entry(id); ok {
 		t.Fatal("Entry still present after Remove")
@@ -129,7 +129,9 @@ func TestCron_RemovedEntryStopsFiring(t *testing.T) {
 		_ = c.Start()
 		time.Sleep(3 * time.Second)
 		synctest.Wait()
-		c.Remove(id)
+		if err := c.Remove(id); err != nil {
+			t.Fatal(err)
+		}
 
 		before := calls.Load()
 		time.Sleep(5 * time.Second)
@@ -547,7 +549,7 @@ func TestCron_TriggerLosesRaceWithRemove(t *testing.T) {
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() { defer wg.Done(); triggerOK.Store(c.Trigger(id) == nil) }()
-		go func() { defer wg.Done(); removeOK.Store(c.Remove(id)) }()
+		go func() { defer wg.Done(); removeOK.Store(c.Remove(id) == nil) }()
 		wg.Wait()
 		_ = c.Stop(context.Background())
 

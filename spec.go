@@ -8,10 +8,20 @@ import (
 	"github.com/libtnb/cron/internal/bitmask"
 )
 
+// This file evaluates a compiled cron expression. Next walks the calendar
+// from the largest unit down: it skips to a matching month, then day, hour,
+// minute and second, restarting the walk whenever a jump carries into a larger
+// unit, and gives up after nextYearLimit years so an impossible date such as
+// "0 0 30 2 *" terminates. Day matching implements the classic coupling rule:
+// when either day-of-month or day-of-week was a literal "*", both must match;
+// otherwise either may.
+
 // nextYearLimit caps SpecSchedule.Next search; matches robfig/cron.
 const nextYearLimit = 5
 
-// SpecSchedule is a parsed cron expression.
+// SpecSchedule is a compiled cron expression as produced by StandardParser.
+// It is immutable and safe for concurrent use; one instance may back several
+// entries. The zero value never fires.
 type SpecSchedule struct {
 	second uint64
 	minute uint64
@@ -22,12 +32,15 @@ type SpecSchedule struct {
 	loc    *time.Location
 }
 
-// Location returns the evaluation timezone.
+// Location returns the time zone the expression is evaluated in: the TZ=
+// prefix if present, otherwise the parser's default. AnalyzeSpec reports it.
 func (s *SpecSchedule) Location() *time.Location {
 	return s.loc
 }
 
-// Next returns the next firing after t, or zero if none is found.
+// Next returns the first firing strictly after t, evaluated in the schedule's
+// Location and returned in t's location, or zero when nothing matches within
+// the next five years.
 //
 // The hour branch reconstructs the wall clock at the target hour instead of
 // adding an absolute (h-hour)*time.Hour, which would overshoot a DST
@@ -54,16 +67,16 @@ func (s *SpecSchedule) Next(t time.Time) time.Time {
 		}
 
 		if 1<<uint(month)&s.month == 0 {
+			nextYear := year
 			m := bitmask.NextInRange(s.month, uint(month)+1, 12)
 			if m < 0 {
 				m = bitmask.NextInRange(s.month, 1, 12)
 				if m < 0 {
 					return time.Time{} // zero-value SpecSchedule: empty month set
 				}
-				t = time.Date(year+1, time.Month(m), 1, 0, 0, 0, 0, loc)
-			} else {
-				t = time.Date(year, time.Month(m), 1, 0, 0, 0, 0, loc)
+				nextYear++
 			}
+			t = time.Date(nextYear, time.Month(m), 1, 0, 0, 0, 0, loc)
 			continue
 		}
 
@@ -86,11 +99,11 @@ func (s *SpecSchedule) Next(t time.Time) time.Time {
 			candidate := time.Date(year, month, day, h, 0, 0, 0, loc)
 			if candidate.Hour() == h && candidate.After(t) {
 				t = candidate
-			} else {
-				t = t.Add(time.Hour -
-					time.Duration(minute)*time.Minute -
-					time.Duration(sec)*time.Second)
+				continue
 			}
+			t = t.Add(time.Hour -
+				time.Duration(minute)*time.Minute -
+				time.Duration(sec)*time.Second)
 			continue
 		}
 
@@ -121,7 +134,8 @@ func (s *SpecSchedule) Next(t time.Time) time.Time {
 	}
 }
 
-// Upcoming is a lazy iterator over future firings.
+// Upcoming lazily yields firings strictly after from, in order, until the
+// schedule exhausts. NextN and Between use it.
 func (s *SpecSchedule) Upcoming(from time.Time) iter.Seq[time.Time] {
 	return func(yield func(time.Time) bool) {
 		cur := from
@@ -138,6 +152,7 @@ func (s *SpecSchedule) Upcoming(from time.Time) iter.Seq[time.Time] {
 	}
 }
 
+// LogValue renders the schedule's kind and location for slog.
 func (s *SpecSchedule) LogValue() slog.Value {
 	loc := "Local"
 	if s.loc != nil {

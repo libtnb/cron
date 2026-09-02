@@ -14,28 +14,28 @@ func TestPauseResume(t *testing.T) {
 	c := cron.MustNew(cron.WithLocation(time.UTC))
 	id, _ := c.Add("@every 1m", cron.JobFunc(noop))
 
-	if c.Pause(cron.EntryID(999)) {
-		t.Fatal("Pause(unknown) should be false")
+	if err := c.Pause(cron.EntryID(999)); !errors.Is(err, cron.ErrEntryNotFound) {
+		t.Fatalf("Pause(unknown) = %v, want ErrEntryNotFound", err)
 	}
-	if !c.Pause(id) {
-		t.Fatal("Pause should be true")
+	if err := c.Pause(id); err != nil {
+		t.Fatalf("Pause: %v", err)
 	}
-	if !c.Pause(id) {
-		t.Fatal("Pause should be idempotent")
+	if err := c.Pause(id); err != nil {
+		t.Fatalf("Pause should be idempotent: %v", err)
 	}
 	e, _ := c.Entry(id)
 	if !e.Paused || !e.Next.IsZero() {
 		t.Fatalf("paused view = %+v", e)
 	}
 
-	if c.Resume(cron.EntryID(999)) {
-		t.Fatal("Resume(unknown) should be false")
+	if err := c.Resume(cron.EntryID(999)); !errors.Is(err, cron.ErrEntryNotFound) {
+		t.Fatalf("Resume(unknown) = %v, want ErrEntryNotFound", err)
 	}
-	if !c.Resume(id) {
-		t.Fatal("Resume should be true")
+	if err := c.Resume(id); err != nil {
+		t.Fatalf("Resume: %v", err)
 	}
-	if !c.Resume(id) {
-		t.Fatal("Resume should be idempotent")
+	if err := c.Resume(id); err != nil {
+		t.Fatalf("Resume should be idempotent: %v", err)
 	}
 	e, _ = c.Entry(id)
 	if e.Paused || e.Next.IsZero() {
@@ -53,7 +53,9 @@ func TestTrigger_PausedEntryStillFires(t *testing.T) {
 	_ = c.Start()
 	defer func() { _ = c.Stop(context.Background()) }()
 
-	c.Pause(id)
+	if err := c.Pause(id); err != nil {
+		t.Fatal(err)
+	}
 	if err := c.Trigger(id); err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +114,9 @@ func TestUpdateSchedule(t *testing.T) {
 func TestUpdate_PausedStaysPausedUntilResume(t *testing.T) {
 	c := cron.MustNew(cron.WithLocation(time.UTC))
 	id, _ := c.Add("0 0 1 1 *", cron.JobFunc(noop))
-	c.Pause(id)
+	if err := c.Pause(id); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := c.Update(id, "* * * * *"); err != nil {
 		t.Fatal(err)
@@ -121,7 +125,9 @@ func TestUpdate_PausedStaysPausedUntilResume(t *testing.T) {
 	if !e.Paused || !e.Next.IsZero() {
 		t.Fatalf("update must keep pause: %+v", e)
 	}
-	c.Resume(id)
+	if err := c.Resume(id); err != nil {
+		t.Fatal(err)
+	}
 	e, _ = c.Entry(id)
 	if e.Paused || e.Next.IsZero() {
 		t.Fatalf("resume after update: %+v", e)
@@ -225,13 +231,13 @@ func TestLifecycleRejectsNilContextWithoutChangingState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.TriggerAndWait(nil, id); !errors.Is(err, cron.ErrNilContext) {
+	if err := c.TriggerAndWait(nil, id); !errors.Is(err, cron.ErrNilContext) { //nolint:staticcheck // a nil Context is the input under test
 		t.Fatalf("TriggerAndWait(nil) = %v", err)
 	}
-	if err := c.Stop(nil); !errors.Is(err, cron.ErrNilContext) {
+	if err := c.Stop(nil); !errors.Is(err, cron.ErrNilContext) { //nolint:staticcheck // a nil Context is the input under test
 		t.Fatalf("Stop(nil) = %v", err)
 	}
-	if err := c.Drain(nil); !errors.Is(err, cron.ErrNilContext) {
+	if err := c.Drain(nil); !errors.Is(err, cron.ErrNilContext) { //nolint:staticcheck // a nil Context is the input under test
 		t.Fatalf("Drain(nil) = %v", err)
 	}
 	if err := c.Start(); err != nil {

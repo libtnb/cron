@@ -40,6 +40,7 @@ type electorConfig struct {
 type ElectorOption func(*electorConfig) error
 
 // WithLeaderName scopes the lease row, letting several fleets share a table.
+// The name is trimmed; an empty name is rejected.
 func WithLeaderName(name string) ElectorOption {
 	return func(config *electorConfig) error {
 		name = strings.TrimSpace(name)
@@ -51,7 +52,7 @@ func WithLeaderName(name string) ElectorOption {
 	}
 }
 
-// WithLeaderTTL overrides DefaultLeaderTTL.
+// WithLeaderTTL overrides DefaultLeaderTTL. A non-positive ttl is rejected.
 func WithLeaderTTL(ttl time.Duration) ElectorOption {
 	return func(config *electorConfig) error {
 		if ttl <= 0 {
@@ -62,7 +63,8 @@ func WithLeaderTTL(ttl time.Duration) ElectorOption {
 	}
 }
 
-// WithLeaderTable overrides DefaultLeaderTable.
+// WithLeaderTable overrides DefaultLeaderTable. The name must be a plain or
+// schema-qualified SQL identifier; anything else is rejected.
 func WithLeaderTable(table string) ElectorOption {
 	return func(config *electorConfig) error {
 		if err := validateIdentifier(table); err != nil {
@@ -74,7 +76,8 @@ func WithLeaderTable(table string) ElectorOption {
 }
 
 // NewElector constructs a lease-based Postgres Elector. The leader table must
-// exist; see Migrate.
+// exist; see Migrate. It returns an error for a nil db, a nil option, an
+// option that rejects its argument, or a failure of the system random source.
 func NewElector(db *sql.DB, opts ...ElectorOption) (*Elector, error) {
 	if db == nil {
 		return nil, fmt.Errorf("postgrescoord: nil database")
@@ -112,7 +115,11 @@ ON CONFLICT (name) DO UPDATE
 	return e, nil
 }
 
-// IsLeader returns false, nil while another process owns the lease.
+// IsLeader acquires the lease when it is free or expired, renews it when this
+// process holds it, and returns false, nil while another process owns it.
+// Each call is bounded by a five-second statement timeout. A nil ctx is
+// rejected; database failures are returned wrapped, so the scheduler skips
+// the fire with cron.SkipElectionError.
 func (e *Elector) IsLeader(ctx context.Context) (bool, error) {
 	if ctx == nil {
 		return false, fmt.Errorf("postgrescoord: nil election context")

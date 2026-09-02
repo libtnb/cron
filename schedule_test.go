@@ -18,12 +18,21 @@ func TestConstantDelay_Next(t *testing.T) {
 	}
 }
 
-func TestConstantDelay_SubSecondClampedToOneSecond(t *testing.T) {
+func TestConstantDelay_SubSecondKeepsExactPeriod(t *testing.T) {
 	d := ConstantDelay(50 * time.Millisecond)
 	from := t0(2026, 1, 1, 0, 0, 0)
 	got := d.Next(from)
-	if want := t0(2026, 1, 1, 0, 0, 1); !got.Equal(want) {
+	if want := from.Add(50 * time.Millisecond); !got.Equal(want) {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestConstantDelay_NonPositiveNeverFires(t *testing.T) {
+	from := t0(2026, 1, 1, 0, 0, 0)
+	for _, d := range []ConstantDelay{0, ConstantDelay(-time.Second)} {
+		if got := d.Next(from); !got.IsZero() {
+			t.Fatalf("ConstantDelay(%v).Next = %v, want zero", time.Duration(d), got)
+		}
 	}
 }
 

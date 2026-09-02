@@ -162,7 +162,7 @@ func TestNew_RejectsInvalidOptions(t *testing.T) {
 		{name: "negative retry max delay", opt: cron.WithRetry(cron.RetryPolicy{MaxDelay: -time.Second})},
 		{name: "negative retry multiplier", opt: cron.WithRetry(cron.RetryPolicy{Multiplier: -1})},
 		{name: "negative retry jitter", opt: cron.WithRetry(cron.RetryPolicy{JitterFrac: -1})},
-		{name: "nil context", opt: cron.WithBaseContext(nil)},
+		{name: "nil context", opt: cron.WithBaseContext(nil)}, //nolint:staticcheck // a nil Context is the input under test
 		{name: "nil claimer", opt: cron.WithClaimer(nil)},
 		{name: "typed nil claimer", opt: cron.WithClaimer(typedNilClaimer)},
 		{name: "nil elector", opt: cron.WithElector(nil)},

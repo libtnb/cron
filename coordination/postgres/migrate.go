@@ -20,6 +20,8 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 }
 
 // MigrateTables is Migrate with custom plain or schema-qualified table names.
+// It rejects a nil ctx or db and invalid identifiers, and bounds the DDL by a
+// five-second statement timeout.
 func MigrateTables(ctx context.Context, db *sql.DB, claimsTable, leaderTable string) error {
 	if ctx == nil {
 		return fmt.Errorf("postgrescoord: nil migration context")

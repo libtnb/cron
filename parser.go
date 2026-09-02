@@ -7,21 +7,48 @@ import (
 	"time"
 )
 
-// starBit marks "*" for DOM/DOW coupling.
-const starBit = uint64(1) << 63
+// This file implements the standard cron grammar. A spec is an optional
+// "TZ=<zone> " or "CRON_TZ=<zone> " prefix followed by either a descriptor
+// ("@hourly", "@every 90s", ...) or five fields (minute hour dom month dow),
+// six with a leading seconds field when the parser allows it. Each field is a
+// comma list of "*", "?", a value, a range "a-b", or any of those with
+// "/step"; month and dow accept three-letter names and dow accepts 7 as
+// Sunday. Fields compile to bitmasks, and starBit records a literal "*" or
+// "?" so SpecSchedule can apply the classic day-of-month/day-of-week
+// coupling.
+
+const (
+	// starBit marks "*" or "?" for DOM/DOW coupling.
+	starBit = uint64(1) << 63
+
+	// minEveryInterval is the smallest interval "@every" accepts; anything
+	// shorter is almost certainly a typo and would spin the scheduler.
+	minEveryInterval = time.Millisecond
+)
 
 // ParserOption configures NewStandardParser.
 type ParserOption func(*parserConfig)
 
-// WithOptionalSeconds accepts both 5- and 6-field specs. A 5-field spec is
-// parsed with second=0.
+// parserConfig is the StandardParser configuration assembled by
+// NewStandardParser.
+type parserConfig struct {
+	seconds       bool
+	secondsStrict bool
+	ext           Parser
+	defaultLoc    *time.Location
+}
+
+// WithOptionalSeconds accepts both five- and six-field specs; a five-field
+// spec is parsed with second 0. Without it six-field specs are rejected.
 func WithOptionalSeconds() ParserOption {
 	return func(c *parserConfig) {
 		c.seconds = true
 	}
 }
 
-// WithRequiredSeconds requires exactly 6 fields, including leading seconds.
+// WithRequiredSeconds requires exactly six fields with a leading seconds
+// field, rejecting five-field specs. It takes precedence over
+// WithOptionalSeconds.
 func WithRequiredSeconds() ParserOption {
 	return func(c *parserConfig) {
 		c.seconds = true
@@ -29,8 +56,9 @@ func WithRequiredSeconds() ParserOption {
 	}
 }
 
-// WithParserExt consults ext before the standard parser. Returning (nil, nil)
-// falls through to standard parsing.
+// WithParserExt consults ext before the standard grammar, for custom
+// descriptors or syntax. ext returning (nil, nil) falls through to standard
+// parsing; a non-nil error is returned as is. A nil ext is ignored.
 func WithParserExt(ext Parser) ParserOption {
 	return func(c *parserConfig) {
 		if isNilLike(ext) {
@@ -40,33 +68,35 @@ func WithParserExt(ext Parser) ParserOption {
 	}
 }
 
-// WithDefaultLocation sets the default timezone for specs without
-// TZ=/CRON_TZ=. nil means time.Local.
+// WithDefaultLocation sets the time zone for specs without a TZ=/CRON_TZ=
+// prefix. nil (the default) means time.Local.
 func WithDefaultLocation(loc *time.Location) ParserOption {
 	return func(c *parserConfig) { c.defaultLoc = loc }
 }
 
-type parserConfig struct {
-	seconds       bool
-	secondsStrict bool
-	ext           Parser
-	defaultLoc    *time.Location
-}
-
-// StandardParser is safe for concurrent use after construction.
+// StandardParser parses the classic cron grammar. It is immutable after
+// construction and safe for concurrent use. New builds one from WithLocation
+// and WithSecondsField unless WithParser is set; ValidateSpec and AnalyzeSpec
+// use a five-field instance in time.Local.
 type StandardParser struct {
 	cfg parserConfig
 }
 
-// NewStandardParser handles 5/6-field specs, descriptors, and TZ prefixes.
+// NewStandardParser builds a parser; without options it accepts five-field
+// specs and descriptors in time.Local.
 func NewStandardParser(opts ...ParserOption) *StandardParser {
-	cfg := parserConfig{}
+	var cfg parserConfig
 	for _, o := range opts {
 		o(&cfg)
 	}
 	return &StandardParser{cfg: cfg}
 }
 
+// Parse compiles spec into a *SpecSchedule, or a ConstantDelay for "@every".
+// Surrounding whitespace is ignored. It returns a *ParseError for an empty
+// spec, a wrong field count, an out-of-range or malformed field, an unknown
+// descriptor, an unknown or empty TZ= zone, or an "@every" interval below one
+// millisecond.
 func (p *StandardParser) Parse(spec string) (Schedule, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
@@ -86,24 +116,9 @@ func (p *StandardParser) Parse(spec string) (Schedule, error) {
 	if loc == nil {
 		loc = time.Local
 	}
-	if i := strings.IndexByte(spec, ' '); i > 0 {
-		head := spec[:i]
-		if eq := strings.IndexByte(head, '='); eq > 0 {
-			key := head[:eq]
-			if key == "TZ" || key == "CRON_TZ" {
-				zone := head[eq+1:]
-				l, err := time.LoadLocation(zone)
-				if err != nil {
-					return nil, &ParseError{
-						Spec: spec, Field: key, Pos: 0,
-						Reason: "unknown time zone " + strconv.Quote(zone),
-						Err:    err,
-					}
-				}
-				loc = l
-				spec = strings.TrimSpace(spec[i+1:])
-			}
-		}
+	spec, loc, err := stripZone(spec, loc)
+	if err != nil {
+		return nil, err
 	}
 
 	if spec[0] == '@' {
@@ -115,38 +130,46 @@ func (p *StandardParser) Parse(spec string) (Schedule, error) {
 	if err != nil {
 		return nil, err
 	}
+	parseField := func(name, expr string, b boundary) (uint64, error) {
+		return getField(
+			spec,
+			name,
+			expr,
+			b,
+		)
+	}
 
-	idx := 0
+	var idx int
 	sec := uint64(1 << 0) // 0
 	if hasSeconds {
-		v, err := getField(spec, "second", fields[idx], boundsSecond)
+		v, err := parseField("second", fields[idx], boundsSecond)
 		if err != nil {
 			return nil, err
 		}
 		sec = v
 		idx++
 	}
-	min, err := getField(spec, "minute", fields[idx], boundsMinute)
+	min, err := parseField("minute", fields[idx], boundsMinute)
 	if err != nil {
 		return nil, err
 	}
 	idx++
-	hour, err := getField(spec, "hour", fields[idx], boundsHour)
+	hour, err := parseField("hour", fields[idx], boundsHour)
 	if err != nil {
 		return nil, err
 	}
 	idx++
-	dom, err := getField(spec, "dom", fields[idx], boundsDom)
+	dom, err := parseField("dom", fields[idx], boundsDom)
 	if err != nil {
 		return nil, err
 	}
 	idx++
-	month, err := getField(spec, "month", fields[idx], boundsMonth)
+	month, err := parseField("month", fields[idx], boundsMonth)
 	if err != nil {
 		return nil, err
 	}
 	idx++
-	dow, err := getField(spec, "dow", fields[idx], boundsDow)
+	dow, err := parseField("dow", fields[idx], boundsDow)
 	if err != nil {
 		return nil, err
 	}
@@ -198,6 +221,9 @@ func (p *StandardParser) expectFieldCount(spec string, n int) (bool, error) {
 	}
 }
 
+// parseDescriptor handles "@every <duration>" and the fixed descriptors.
+// Descriptor schedules mark every unrestricted field with starBit, exactly as
+// a literal "*" would.
 func (p *StandardParser) parseDescriptor(spec string, loc *time.Location) (Schedule, error) {
 	const everyPrefix = "@every "
 	if strings.HasPrefix(spec, everyPrefix) {
@@ -208,8 +234,11 @@ func (p *StandardParser) parseDescriptor(spec string, loc *time.Location) (Sched
 				Reason: "invalid duration", Err: err,
 			}
 		}
-		if dur <= 0 {
-			return nil, &ParseError{Spec: spec, Field: "@every", Pos: -1, Reason: "duration must be > 0"}
+		if dur < minEveryInterval {
+			return nil, &ParseError{
+				Spec: spec, Field: "@every", Pos: -1,
+				Reason: "duration must be at least " + minEveryInterval.String(),
+			}
 		}
 		return ConstantDelay(dur), nil
 	}
@@ -272,17 +301,10 @@ func (p *StandardParser) parseDescriptor(spec string, loc *time.Location) (Sched
 	return nil, &ParseError{Spec: spec, Pos: 0, Reason: "unrecognized descriptor"}
 }
 
+// boundary is the value range of one field plus the names it accepts.
 type boundary struct {
 	min, max uint
 	names    map[string]uint
-}
-
-func rangeAll(b boundary) uint64 {
-	var bm uint64
-	for v := b.min; v <= b.max; v++ {
-		bm |= 1 << v
-	}
-	return bm
 }
 
 var (
@@ -316,10 +338,56 @@ var (
 	}}
 )
 
+// rangeAll returns the bitmask with every value of b set.
+func rangeAll(b boundary) uint64 {
+	var bm uint64
+	for v := b.min; v <= b.max; v++ {
+		bm |= 1 << v
+	}
+	return bm
+}
+
+// stripZone resolves and removes a leading "TZ=<zone> " or "CRON_TZ=<zone> "
+// prefix from an already trimmed spec. Specs without a prefix come back
+// unchanged with fallback.
+func stripZone(spec string, fallback *time.Location) (string, *time.Location, error) {
+	i := strings.IndexByte(spec, ' ')
+	if i <= 0 {
+		return spec, fallback, nil
+	}
+	key, zone, ok := strings.Cut(spec[:i], "=")
+	if !ok || key == "" {
+		return spec, fallback, nil
+	}
+	if key != "TZ" && key != "CRON_TZ" {
+		return spec, fallback, nil
+	}
+	if zone == "" {
+		return "", nil, &ParseError{Spec: spec, Field: key, Pos: 0, Reason: "empty time zone"}
+	}
+	loc, err := time.LoadLocation(zone)
+	if err != nil {
+		return "", nil, &ParseError{
+			Spec:   spec,
+			Field:  key,
+			Pos:    0,
+			Reason: "unknown time zone " + strconv.Quote(zone),
+			Err:    err,
+		}
+	}
+	return strings.TrimSpace(spec[i+1:]), loc, nil
+}
+
+// getField compiles a comma-separated field expression into a bitmask.
 func getField(spec, name, expr string, b boundary) (uint64, error) {
 	var bm uint64
 	for part := range strings.SplitSeq(expr, ",") {
-		v, err := getRange(spec, name, part, b)
+		v, err := getRange(
+			spec,
+			name,
+			part,
+			b,
+		)
 		if err != nil {
 			return 0, err
 		}
@@ -328,6 +396,8 @@ func getField(spec, name, expr string, b boundary) (uint64, error) {
 	return bm, nil
 }
 
+// getRange compiles one part of a field: "*", "?", "n", "a-b", or any of
+// those followed by "/step".
 func getRange(spec, name, expr string, b boundary) (uint64, error) {
 	var (
 		start, end, step uint
@@ -343,11 +413,11 @@ func getRange(spec, name, expr string, b boundary) (uint64, error) {
 	case 2:
 		s, err := strconv.ParseUint(rangeAndStep[1], 10, 32)
 		if err != nil || s == 0 {
-			return 0, &ParseError{Spec: spec, Field: name, Pos: -1, Reason: "invalid step " + strconv.Quote(rangeAndStep[1])}
+			return 0, fieldError(spec, name, "invalid step "+strconv.Quote(rangeAndStep[1]))
 		}
 		step = uint(s)
 	default:
-		return 0, &ParseError{Spec: spec, Field: name, Pos: -1, Reason: "too many slashes in " + strconv.Quote(expr)}
+		return 0, fieldError(spec, name, "too many slashes in "+strconv.Quote(expr))
 	}
 
 	lowHigh := rangeAndStep[0]
@@ -361,38 +431,38 @@ func getRange(spec, name, expr string, b boundary) (uint64, error) {
 		case 1:
 			start, err = parseIntOrName(lh[0], b)
 			if err != nil {
-				return 0, &ParseError{Spec: spec, Field: name, Pos: -1, Reason: err.Error()}
+				return 0, fieldError(spec, name, err.Error())
 			}
+			// "n/step" runs from n to the field maximum; a bare "n" is just n.
+			end = start
 			if len(rangeAndStep) == 2 {
 				end = b.max
-			} else {
-				end = start
 			}
 		case 2:
 			start, err = parseIntOrName(lh[0], b)
 			if err != nil {
-				return 0, &ParseError{Spec: spec, Field: name, Pos: -1, Reason: err.Error()}
+				return 0, fieldError(spec, name, err.Error())
 			}
 			end, err = parseIntOrName(lh[1], b)
 			if err != nil {
-				return 0, &ParseError{Spec: spec, Field: name, Pos: -1, Reason: err.Error()}
+				return 0, fieldError(spec, name, err.Error())
 			}
 		default:
-			return 0, &ParseError{Spec: spec, Field: name, Pos: -1, Reason: "too many dashes in " + strconv.Quote(lowHigh)}
+			return 0, fieldError(spec, name, "too many dashes in "+strconv.Quote(lowHigh))
 		}
 	}
 
 	if start < b.min {
-		return 0, &ParseError{Spec: spec, Field: name, Pos: -1,
-			Reason: strconv.Itoa(int(start)) + " below minimum " + strconv.Itoa(int(b.min))}
+		reason := strconv.Itoa(int(start)) + " below minimum " + strconv.Itoa(int(b.min))
+		return 0, fieldError(spec, name, reason)
 	}
 	if end > b.max {
-		return 0, &ParseError{Spec: spec, Field: name, Pos: -1,
-			Reason: strconv.Itoa(int(end)) + " above maximum " + strconv.Itoa(int(b.max))}
+		reason := strconv.Itoa(int(end)) + " above maximum " + strconv.Itoa(int(b.max))
+		return 0, fieldError(spec, name, reason)
 	}
 	if start > end {
-		return 0, &ParseError{Spec: spec, Field: name, Pos: -1,
-			Reason: "beginning of range " + strconv.Itoa(int(start)) + " beyond end " + strconv.Itoa(int(end))}
+		reason := "beginning of range " + strconv.Itoa(int(start)) + " beyond end " + strconv.Itoa(int(end))
+		return 0, fieldError(spec, name, reason)
 	}
 
 	// Iterate in uint64 so a huge step near 2^32 cannot wrap on 32-bit
@@ -403,6 +473,11 @@ func getRange(spec, name, expr string, b boundary) (uint64, error) {
 	return bits | extra, nil
 }
 
+// fieldError builds the ParseError for a fault inside one field.
+func fieldError(spec, name, reason string) *ParseError {
+	return &ParseError{Spec: spec, Field: name, Pos: -1, Reason: reason}
+}
+
 // normalizeDow folds bit 7 (the POSIX alias for Sunday) into bit 0.
 func normalizeDow(bm uint64) uint64 {
 	if bm&(1<<7) != 0 {
@@ -411,6 +486,8 @@ func normalizeDow(bm uint64) uint64 {
 	return bm
 }
 
+// parseIntOrName resolves a number or, when b has names, a case-insensitive
+// name such as "mon" or "jan".
 func parseIntOrName(s string, b boundary) (uint, error) {
 	if b.names != nil {
 		if v, ok := b.names[strings.ToLower(s)]; ok {

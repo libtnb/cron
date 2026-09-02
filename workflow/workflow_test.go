@@ -253,7 +253,7 @@ func TestWorkflow_PreCancelledContextSkipsAllSteps(t *testing.T) {
 func TestWorkflow_NilContextIsRejected(t *testing.T) {
 	builder := workflow.New()
 	builder.Job("root", cron.JobFunc(func(context.Context) error { return nil }))
-	execution := builder.MustBuild().Execute(nil)
+	execution := builder.MustBuild().Execute(nil) //nolint:staticcheck // a nil Context is the input under test
 	if !errors.Is(execution.Err(), workflow.ErrNilContext) {
 		t.Fatalf("Execute(nil) error = %v", execution.Err())
 	}

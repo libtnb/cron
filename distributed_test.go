@@ -486,8 +486,8 @@ func TestEntryKeyValidation(t *testing.T) {
 	if _, err := c.Add("@daily", cron.JobFunc(noop), cron.WithName("same"), cron.WithKey("unique")); !errors.Is(err, cron.ErrDuplicateKey) {
 		t.Fatalf("duplicate key error = %v", err)
 	}
-	if !c.Remove(first) {
-		t.Fatal("Remove failed")
+	if err := c.Remove(first); err != nil {
+		t.Fatalf("Remove: %v", err)
 	}
 	if _, err := c.Add("@daily", cron.JobFunc(noop), cron.WithName("same"), cron.WithKey("unique")); err != nil {
 		t.Fatalf("reusing a removed key: %v", err)

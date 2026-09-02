@@ -7,23 +7,25 @@ import (
 	"time"
 )
 
-// RetryPolicy describes exponential backoff with optional jitter.
-// MaxRetries == 0 disables retry; negative means unlimited until ctx
-// cancellation. Fields are exported for config-driven assembly; use
-// Retry(...) for programmatic construction.
+// RetryPolicy describes exponential backoff with optional jitter for jobs
+// that return an error. MaxRetries == 0 disables retry; negative means retry
+// until the context is cancelled. Fields are exported for config-driven
+// assembly; use Retry for programmatic construction. Install a policy with
+// WithRetry, WithEntryRetry, wrap.Retry or workflow.WithRetry.
 type RetryPolicy struct {
-	MaxRetries int
-	Initial    time.Duration
-	MaxDelay   time.Duration
-	Multiplier float64
-	JitterFrac float64
+	MaxRetries int           // retries after the initial attempt; 0 disables, negative is unlimited
+	Initial    time.Duration // first retry delay; non-positive means one second
+	MaxDelay   time.Duration // backoff cap; zero means uncapped
+	Multiplier float64       // per-attempt growth factor; 1 or less keeps the delay constant
+	JitterFrac float64       // uniform jitter fraction in [0, 1], e.g. 0.1 for ±10%
 }
 
 // RetryOption configures a RetryPolicy built by Retry.
 type RetryOption func(*RetryPolicy)
 
 // Retry builds a RetryPolicy. maxRetries is the number of retries after the
-// initial attempt; negative retries until ctx cancellation.
+// initial attempt; negative retries until the context is cancelled. Values
+// are not validated here: WithRetry and WithEntryRetry reject invalid ones.
 func Retry(maxRetries int, opts ...RetryOption) RetryPolicy {
 	p := RetryPolicy{MaxRetries: maxRetries}
 	for _, o := range opts {
@@ -32,33 +34,39 @@ func Retry(maxRetries int, opts ...RetryOption) RetryPolicy {
 	return p
 }
 
-// RetryInitial sets the first retry delay (default 1s).
+// RetryInitial sets the first retry delay. The default is one second.
 func RetryInitial(d time.Duration) RetryOption {
 	return func(p *RetryPolicy) { p.Initial = d }
 }
 
-// RetryMaxDelay caps backoff (zero = uncapped).
+// RetryMaxDelay caps the backoff delay. Zero, the default, is uncapped.
 func RetryMaxDelay(d time.Duration) RetryOption {
 	return func(p *RetryPolicy) { p.MaxDelay = d }
 }
 
-// RetryMultiplier is the per-attempt growth factor (<=1 stays constant).
+// RetryMultiplier sets the per-attempt growth factor. Values of 1 or less
+// keep the delay constant.
 func RetryMultiplier(m float64) RetryOption {
 	return func(p *RetryPolicy) { p.Multiplier = m }
 }
 
-// RetryJitterFrac is fractional uniform jitter (e.g. 0.1 = ±10%).
+// RetryJitterFrac sets uniform jitter as a fraction of the delay, e.g. 0.1
+// for ±10%. Valid values are in [0, 1].
 func RetryJitterFrac(f float64) RetryOption {
 	return func(p *RetryPolicy) { p.JitterFrac = f }
 }
 
-// IsZero is keyed only on MaxRetries so half-filled policies (e.g. only
-// Initial set) don't produce a useless wrapper.
+// IsZero reports whether the policy disables retry. It is keyed only on
+// MaxRetries, so a half-filled policy (for example only Initial set) does not
+// produce a useless wrapper.
 func (p RetryPolicy) IsZero() bool { return p.MaxRetries == 0 }
 
-// Wrapper returns a Wrapper that retries on error per p. Attempt errors are
-// joined via errors.Join; ctx cancellation aborts, recording context.Cause so
-// ErrJobTimeout / ErrCronStopping survive into the joined error.
+// Wrapper returns a Wrapper that re-runs the job on error according to p. The
+// returned error joins every attempt's error with errors.Join, keeping at
+// most the first and the 15 most recent when retries are unlimited. Context
+// cancellation aborts before the next attempt and appends context.Cause, so
+// ErrJobTimeout and ErrCronStopping survive into the joined error and remain
+// matchable with errors.Is. A zero policy runs the job exactly once.
 func (p RetryPolicy) Wrapper() Wrapper {
 	return func(j Job) Job {
 		return JobFunc(func(ctx context.Context) error {
@@ -105,6 +113,7 @@ func (p RetryPolicy) Wrapper() Wrapper {
 	}
 }
 
+// validate rejects negative delays and a jitter fraction outside [0, 1].
 func (p RetryPolicy) validate() error {
 	switch {
 	case p.Initial < 0:
@@ -120,6 +129,8 @@ func (p RetryPolicy) validate() error {
 	}
 }
 
+// backoff computes the delay before retry number attempt (0-based), applying
+// the multiplier, the cap and the jitter.
 func (p RetryPolicy) backoff(attempt int) time.Duration {
 	d := p.Initial
 	if d <= 0 {

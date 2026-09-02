@@ -1,4 +1,6 @@
-// Package parserext provides optional cron parser extensions.
+// Package parserext provides cron.Parser extensions beyond the standard
+// grammar. NewQuartzParser adds the Quartz day tokens L, L-n, LW, nW, N#M and
+// NL while forwarding everything else to the standard parser.
 package parserext
 
 import (
@@ -16,6 +18,12 @@ import (
 // nextYearLimit caps QuartzSchedule.Next search; matches SpecSchedule.
 const nextYearLimit = 5
 
+// fieldBounds is the value range of one field plus the names it accepts.
+type fieldBounds struct {
+	lo, hi uint
+	names  map[string]uint
+}
+
 var (
 	monthNames = map[string]uint{
 		"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -24,18 +32,30 @@ var (
 	dowNames = map[string]uint{
 		"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6,
 	}
+
+	secondBounds = fieldBounds{lo: 0, hi: 59}
+	minuteBounds = fieldBounds{lo: 0, hi: 59}
+	hourBounds   = fieldBounds{lo: 0, hi: 23}
+	domBounds    = fieldBounds{lo: 1, hi: 31}
+	monthBounds  = fieldBounds{lo: 1, hi: 12, names: monthNames}
+	dowBounds    = fieldBounds{lo: 0, hi: 6, names: dowNames}
 )
 
+// quartzParser routes specs between the Quartz grammar and two standard
+// parsers (five and six fields) sharing its default location.
 type quartzParser struct {
 	loc  *time.Location
 	std5 *cron.StandardParser
 	std6 *cron.StandardParser
 }
 
-// NewQuartzParser handles standard specs plus the Quartz tokens L, L-n, LW,
-// nW, N#M, and NL. Numeric day-of-week stays cron-style 0-6 Sunday-first (not
-// Quartz's 1-7); name forms (FRI#3, FRIL) are unambiguous. Specs without
-// Quartz-only tokens are forwarded to the standard parser.
+// NewQuartzParser returns a cron.Parser that handles standard specs plus the
+// Quartz day tokens L, L-n, LW, nW, N#M and NL, in five- or six-field
+// (leading seconds) form. Numeric day-of-week stays cron-style 0-6
+// Sunday-first, not Quartz's 1-7; name forms (FRI#3, FRIL) are unambiguous.
+// Specs without Quartz-only tokens, descriptors and TZ prefixes are forwarded
+// to the standard parser, so their errors and semantics are identical. A nil
+// loc means time.Local. Install it with cron.WithParser.
 func NewQuartzParser(loc *time.Location) cron.Parser {
 	if loc == nil {
 		loc = time.Local
@@ -47,6 +67,9 @@ func NewQuartzParser(loc *time.Location) cron.Parser {
 	}
 }
 
+// Parse compiles spec into a *QuartzSchedule when it contains Quartz tokens
+// and otherwise delegates to the standard parser. It returns *cron.ParseError
+// for rejected specs.
 func (p *quartzParser) Parse(spec string) (cron.Schedule, error) {
 	trimmed := strings.TrimSpace(spec)
 	if trimmed == "" {
@@ -56,28 +79,15 @@ func (p *quartzParser) Parse(spec string) (cron.Schedule, error) {
 		return p.std5.Parse(spec)
 	}
 
-	loc := p.loc
-	if i := strings.IndexByte(trimmed, ' '); i > 0 {
-		head := trimmed[:i]
-		if eq := strings.IndexByte(head, '='); eq > 0 {
-			key := head[:eq]
-			if key == "TZ" || key == "CRON_TZ" {
-				zone := head[eq+1:]
-				l, err := time.LoadLocation(zone)
-				if err != nil {
-					return nil, &cron.ParseError{Spec: spec, Field: key, Pos: 0,
-						Reason: "unknown time zone " + strconv.Quote(zone), Err: err}
-				}
-				loc = l
-				trimmed = strings.TrimSpace(trimmed[i+1:])
-				if trimmed != "" && trimmed[0] == '@' {
-					return p.std5.Parse(spec)
-				}
-			}
-		}
+	rest, loc, err := splitZone(spec, trimmed, p.loc)
+	if err != nil {
+		return nil, err
+	}
+	if rest != "" && rest[0] == '@' {
+		return p.std5.Parse(spec)
 	}
 
-	fields := strings.Fields(trimmed)
+	fields := strings.Fields(rest)
 	if !hasQuartzTokens(fields) {
 		switch len(fields) {
 		case 5:
@@ -85,8 +95,11 @@ func (p *quartzParser) Parse(spec string) (cron.Schedule, error) {
 		case 6:
 			return p.std6.Parse(spec)
 		default:
-			return nil, &cron.ParseError{Spec: spec, Pos: -1,
-				Reason: "expected 5 or 6 fields, got " + strconv.Itoa(len(fields))}
+			return nil, &cron.ParseError{
+				Spec:   spec,
+				Pos:    -1,
+				Reason: "expected 5 or 6 fields, got " + strconv.Itoa(len(fields)),
+			}
 		}
 	}
 
@@ -96,12 +109,17 @@ func (p *quartzParser) Parse(spec string) (cron.Schedule, error) {
 	case 6:
 		return parseQuartz6(spec, fields, loc)
 	default:
-		return nil, &cron.ParseError{Spec: spec, Pos: -1,
-			Reason: "expected 5 or 6 fields with quartz tokens, got " + strconv.Itoa(len(fields))}
+		return nil, &cron.ParseError{
+			Spec:   spec,
+			Pos:    -1,
+			Reason: "expected 5 or 6 fields with quartz tokens, got " + strconv.Itoa(len(fields)),
+		}
 	}
 }
 
-// QuartzSchedule supports the Quartz subset parsed by NewQuartzParser.
+// QuartzSchedule is a compiled expression containing Quartz day tokens, as
+// produced by NewQuartzParser. It is immutable and safe for concurrent use;
+// the zero value never fires.
 type QuartzSchedule struct {
 	second uint64 // bitmap 0-59
 	minute uint64 // bitmap 0-59
@@ -112,6 +130,7 @@ type QuartzSchedule struct {
 	loc    *time.Location
 }
 
+// domRule is the compiled day-of-month field; exactly one form applies.
 type domRule struct {
 	bitmap         uint64 // standard bitmap (bits 1..31)
 	star           bool   // originally "*" or "?"
@@ -121,6 +140,7 @@ type domRule struct {
 	nearestWeekday int    // "nW": weekday nearest to day n; 0 if unset
 }
 
+// dowRule is the compiled day-of-week field; exactly one form applies.
 type dowRule struct {
 	bitmap     uint64 // standard bitmap (bits 0..6)
 	star       bool   // originally "*" or "?"
@@ -129,14 +149,17 @@ type dowRule struct {
 	lastN      int    // 0..6 weekday for NL, -1 if unset
 }
 
-// Location returns the schedule's evaluation time zone.
+// Location returns the schedule's evaluation time zone; cron.AnalyzeSpecWith
+// reports it.
 func (s *QuartzSchedule) Location() *time.Location {
 	return s.loc
 }
 
-// Next returns the next firing after t, or zero if none is found. It shares
-// SpecSchedule.Next's structure: bitmask jumps with wall-clock reconstruction
-// for the hour so DST spring-forward days are handled correctly.
+// Next returns the first firing strictly after t, evaluated in the schedule's
+// Location and returned in t's location, or zero when nothing matches within
+// the next five years. It shares cron.SpecSchedule.Next's structure: bitmask
+// jumps with wall-clock reconstruction for the hour, so DST spring-forward
+// days are handled correctly.
 func (s *QuartzSchedule) Next(t time.Time) time.Time {
 	origLoc := t.Location()
 	loc := s.loc
@@ -157,16 +180,16 @@ func (s *QuartzSchedule) Next(t time.Time) time.Time {
 		}
 
 		if 1<<uint(month)&s.month == 0 {
+			nextYear := year
 			m := bitmask.NextInRange(s.month, uint(month)+1, 12)
 			if m < 0 {
 				m = bitmask.NextInRange(s.month, 1, 12)
 				if m < 0 {
 					return time.Time{} // zero-value QuartzSchedule: empty month set
 				}
-				t = time.Date(year+1, time.Month(m), 1, 0, 0, 0, 0, loc)
-			} else {
-				t = time.Date(year, time.Month(m), 1, 0, 0, 0, 0, loc)
+				nextYear++
 			}
+			t = time.Date(nextYear, time.Month(m), 1, 0, 0, 0, 0, loc)
 			continue
 		}
 
@@ -189,11 +212,11 @@ func (s *QuartzSchedule) Next(t time.Time) time.Time {
 			candidate := time.Date(year, month, day, h, 0, 0, 0, loc)
 			if candidate.Hour() == h && candidate.After(t) {
 				t = candidate
-			} else {
-				t = t.Add(time.Hour -
-					time.Duration(minute)*time.Minute -
-					time.Duration(sec)*time.Second)
+				continue
 			}
+			t = t.Add(time.Hour -
+				time.Duration(minute)*time.Minute -
+				time.Duration(sec)*time.Second)
 			continue
 		}
 
@@ -224,7 +247,8 @@ func (s *QuartzSchedule) Next(t time.Time) time.Time {
 	}
 }
 
-// Upcoming is a lazy iterator over future firings.
+// Upcoming lazily yields firings strictly after from, in order, until the
+// schedule exhausts. cron.NextN and cron.Between use it.
 func (s *QuartzSchedule) Upcoming(from time.Time) iter.Seq[time.Time] {
 	return func(yield func(time.Time) bool) {
 		cur := from
@@ -238,6 +262,8 @@ func (s *QuartzSchedule) Upcoming(from time.Time) iter.Seq[time.Time] {
 	}
 }
 
+// dayMatches applies the standard DOM/DOW coupling: AND when either field was
+// "*" or "?", OR otherwise.
 func (s *QuartzSchedule) dayMatches(t time.Time) bool {
 	domOK := s.checkDom(t)
 	dowOK := s.checkDow(t)
@@ -254,7 +280,13 @@ func (s *QuartzSchedule) checkDom(t time.Time) bool {
 	case s.dom.lastWeekday:
 		return t.Day() == lastWeekdayOfMonth(t.Year(), t.Month(), s.loc)
 	case s.dom.nearestWeekday > 0:
-		return t.Day() == nearestWeekdayTo(t.Year(), t.Month(), s.dom.nearestWeekday, s.loc)
+		nearest := nearestWeekdayTo(
+			t.Year(),
+			t.Month(),
+			s.dom.nearestWeekday,
+			s.loc,
+		)
+		return t.Day() == nearest
 	default:
 		return 1<<uint(t.Day())&s.dom.bitmap != 0
 	}
@@ -278,15 +310,49 @@ func (s *QuartzSchedule) checkDow(t time.Time) bool {
 	return 1<<uint(wd)&s.dow.bitmap != 0
 }
 
+// splitZone resolves and removes a leading "TZ=<zone> " or "CRON_TZ=<zone> "
+// prefix from trimmed and returns the remainder; spec is the original text
+// for error reporting. Specs without a prefix come back unchanged with
+// fallback.
+func splitZone(spec, trimmed string, fallback *time.Location) (string, *time.Location, error) {
+	i := strings.IndexByte(trimmed, ' ')
+	if i <= 0 {
+		return trimmed, fallback, nil
+	}
+	key, zone, ok := strings.Cut(trimmed[:i], "=")
+	if !ok || key == "" {
+		return trimmed, fallback, nil
+	}
+	if key != "TZ" && key != "CRON_TZ" {
+		return trimmed, fallback, nil
+	}
+	if zone == "" {
+		return "", nil, &cron.ParseError{Spec: spec, Field: key, Pos: 0, Reason: "empty time zone"}
+	}
+	loc, err := time.LoadLocation(zone)
+	if err != nil {
+		return "", nil, &cron.ParseError{
+			Spec:   spec,
+			Field:  key,
+			Pos:    0,
+			Reason: "unknown time zone " + strconv.Quote(zone),
+			Err:    err,
+		}
+	}
+	return strings.TrimSpace(trimmed[i+1:]), loc, nil
+}
+
 func hasQuartzTokens(fields []string) bool {
 	return slices.ContainsFunc(fields, tokenIsQuartz)
 }
 
+// tokenIsQuartz reports whether a field uses syntax only the Quartz grammar
+// understands: L, LW, L-n, N#M, NL with a numeric or named weekday, or nW.
 func tokenIsQuartz(s string) bool {
-	if s == "L" || s == "LW" || strings.HasPrefix(s, "L-") {
-		return true
-	}
-	if strings.Contains(s, "#") {
+	lastDay := s == "L" || strings.HasPrefix(s, "L-")
+	lastWeekday := s == "LW"
+	nthWeekday := strings.Contains(s, "#")
+	if lastDay || lastWeekday || nthWeekday {
 		return true
 	}
 	if len(s) < 2 {
@@ -308,11 +374,20 @@ func tokenIsQuartz(s string) bool {
 }
 
 func parseQuartz5(spec string, fields []string, loc *time.Location) (cron.Schedule, error) {
-	return buildQuartz(spec, 1<<0, fields[0], fields[1], fields[2], fields[3], fields[4], loc)
+	return buildQuartz(
+		spec,
+		1<<0,
+		fields[0],
+		fields[1],
+		fields[2],
+		fields[3],
+		fields[4],
+		loc,
+	)
 }
 
 func parseQuartz6(spec string, fields []string, loc *time.Location) (cron.Schedule, error) {
-	sec, err := bitmap(fields[0], 0, 59, nil)
+	sec, err := bitmap(fields[0], secondBounds)
 	if err != nil {
 		return nil, &cron.ParseError{Spec: spec, Field: "second", Reason: err.Error(), Pos: -1}
 	}
@@ -338,15 +413,15 @@ func buildQuartz(
 	dow string,
 	loc *time.Location,
 ) (cron.Schedule, error) {
-	min, err := bitmap(minute, 0, 59, nil)
+	min, err := bitmap(minute, minuteBounds)
 	if err != nil {
 		return nil, &cron.ParseError{Spec: spec, Field: "minute", Reason: err.Error(), Pos: -1}
 	}
-	hr, err := bitmap(hour, 0, 23, nil)
+	hr, err := bitmap(hour, hourBounds)
 	if err != nil {
 		return nil, &cron.ParseError{Spec: spec, Field: "hour", Reason: err.Error(), Pos: -1}
 	}
-	mo, err := bitmap(month, 1, 12, monthNames)
+	mo, err := bitmap(month, monthBounds)
 	if err != nil {
 		return nil, &cron.ParseError{Spec: spec, Field: "month", Reason: err.Error(), Pos: -1}
 	}
@@ -369,6 +444,7 @@ func buildQuartz(
 	}, nil
 }
 
+// parseDom compiles the day-of-month field, including L, L-n, LW and nW.
 func parseDom(field string) (domRule, error) {
 	switch {
 	case field == "L":
@@ -377,36 +453,41 @@ func parseDom(field string) (domRule, error) {
 		return domRule{lastWeekday: true}, nil
 	case strings.HasPrefix(field, "L-"):
 		n, err := strconv.Atoi(field[2:])
-		if err != nil || n < 1 || n > 30 {
+		outOfRange := n < 1 || n > 30
+		if err != nil || outOfRange {
 			return domRule{}, errors.New("invalid L-offset token " + strconv.Quote(field))
 		}
 		return domRule{last: true, lastOffset: n}, nil
 	case len(field) >= 2 && field[len(field)-1] == 'W':
 		n, err := strconv.Atoi(field[:len(field)-1])
-		if err != nil || n < 1 || n > 31 {
+		outOfRange := n < 1 || n > 31
+		if err != nil || outOfRange {
 			return domRule{}, errors.New("invalid W token " + strconv.Quote(field))
 		}
 		return domRule{nearestWeekday: n}, nil
 	case field == "*" || field == "?":
-		bm, _ := bitmap(field, 1, 31, nil)
+		bm, _ := bitmap(field, domBounds)
 		return domRule{bitmap: bm, star: true}, nil
 	}
-	bm, err := bitmap(field, 1, 31, nil)
+	bm, err := bitmap(field, domBounds)
 	if err != nil {
 		return domRule{}, err
 	}
 	return domRule{bitmap: bm}, nil
 }
 
+// parseDow compiles the day-of-week field, including N#M, NL and bare L.
 func parseDow(field string) (dowRule, error) {
 	if field == "*" || field == "?" {
-		bm, _ := bitmap(field, 0, 6, nil)
+		bm, _ := bitmap(field, dowBounds)
 		return dowRule{bitmap: bm, star: true, nthWeekday: -1, lastN: -1}, nil
 	}
 	if i := strings.IndexByte(field, '#'); i > 0 {
 		w, okW := parseDowValue(field[:i])
 		n, err := strconv.Atoi(field[i+1:])
-		if !okW || err != nil || n < 1 || n > 5 {
+		invalid := !okW || err != nil
+		outOfRange := n < 1 || n > 5
+		if invalid || outOfRange {
 			return dowRule{}, errors.New("invalid N#M token: " + strconv.Quote(field))
 		}
 		return dowRule{nthWeekday: w, nthN: n, lastN: -1}, nil
@@ -421,7 +502,7 @@ func parseDow(field string) (dowRule, error) {
 		}
 		return dowRule{lastN: w, nthWeekday: -1}, nil
 	}
-	bm, err := bitmap(field, 0, 6, dowNames)
+	bm, err := bitmap(field, dowBounds)
 	if err != nil {
 		return dowRule{}, err
 	}
@@ -446,6 +527,7 @@ func lastDayOfMonth(year int, month time.Month, loc *time.Location) int {
 	return time.Date(year, month+1, 0, 0, 0, 0, 0, loc).Day()
 }
 
+// lastWeekdayOfMonth resolves Quartz LW: the last Monday-Friday of the month.
 func lastWeekdayOfMonth(year int, month time.Month, loc *time.Location) int {
 	d := lastDayOfMonth(year, month, loc)
 	switch time.Date(year, month, d, 0, 0, 0, 0, loc).Weekday() {
@@ -481,17 +563,19 @@ func nearestWeekdayTo(year int, month time.Month, day int, loc *time.Location) i
 	}
 }
 
-func bitmap(field string, lo, hi uint, names map[string]uint) (uint64, error) {
+// bitmap compiles a comma list of values, ranges and steps into a bit set
+// within b.
+func bitmap(field string, b fieldBounds) (uint64, error) {
 	if field == "*" || field == "?" {
 		var bm uint64
-		for v := lo; v <= hi; v++ {
+		for v := b.lo; v <= b.hi; v++ {
 			bm |= 1 << v
 		}
 		return bm, nil
 	}
 	var out uint64
 	for part := range strings.SplitSeq(field, ",") {
-		bm, err := parsePart(part, lo, hi, names)
+		bm, err := parsePart(part, b)
 		if err != nil {
 			return 0, err
 		}
@@ -500,7 +584,9 @@ func bitmap(field string, lo, hi uint, names map[string]uint) (uint64, error) {
 	return out, nil
 }
 
-func parsePart(part string, lo, hi uint, names map[string]uint) (uint64, error) {
+// parsePart compiles one value, "a-b" range, "*" or "?", optionally followed
+// by "/step", into a bit set within b.
+func parsePart(part string, b fieldBounds) (uint64, error) {
 	step := uint(1)
 	if head, tail, hasStep := strings.Cut(part, "/"); hasStep {
 		s, err := strconv.ParseUint(tail, 10, 32)
@@ -513,24 +599,24 @@ func parsePart(part string, lo, hi uint, names map[string]uint) (uint64, error) 
 	var start, end uint
 	switch part {
 	case "*", "?":
-		start, end = lo, hi
+		start, end = b.lo, b.hi
 	default:
 		if lhs, rhs, hasRange := strings.Cut(part, "-"); hasRange {
-			a, okA := parseValue(lhs, names)
-			b, okB := parseValue(rhs, names)
-			if !okA || !okB {
+			lo, okLo := parseValue(lhs, b.names)
+			hi, okHi := parseValue(rhs, b.names)
+			if !okLo || !okHi {
 				return 0, errors.New("invalid range " + strconv.Quote(part))
 			}
-			start, end = a, b
+			start, end = lo, hi
 		} else {
-			v, ok := parseValue(part, names)
+			v, ok := parseValue(part, b.names)
 			if !ok {
 				return 0, errors.New("invalid number " + strconv.Quote(part))
 			}
 			start, end = v, v
 		}
 	}
-	if start < lo || end > hi {
+	if start < b.lo || end > b.hi {
 		return 0, errors.New("value out of range " + strconv.Quote(part))
 	}
 	if start > end {
@@ -544,6 +630,8 @@ func parsePart(part string, lo, hi uint, names map[string]uint) (uint64, error) 
 	return bm, nil
 }
 
+// parseValue resolves a number or, when names is set, a case-insensitive
+// name.
 func parseValue(s string, names map[string]uint) (uint, bool) {
 	if v, err := strconv.ParseUint(s, 10, 32); err == nil {
 		return uint(v), true

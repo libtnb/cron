@@ -2,6 +2,7 @@ package cron
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -50,12 +51,12 @@ func TestCron_FireDueComputesNextOutsideMu(t *testing.T) {
 	}()
 	<-s.entered
 
-	removed := make(chan bool, 1)
+	removed := make(chan error, 1)
 	go func() { removed <- c.Remove(id) }()
 	select {
-	case ok := <-removed:
-		if !ok {
-			t.Fatal("Remove returned false")
+	case err := <-removed:
+		if err != nil {
+			t.Fatalf("Remove: %v", err)
 		}
 	case <-time.After(200 * time.Millisecond):
 		close(s.release)
@@ -103,11 +104,35 @@ func (s neverEndingSchedule) Next(now time.Time) time.Time {
 	return now.Add(s.step)
 }
 
-func TestFindMostRecentMissed_HitsCap(t *testing.T) {
+func TestFindMostRecentMissed_LongBacklogIsRecent(t *testing.T) {
 	now := time.Now()
 	got := findMostRecentMissed(neverEndingSchedule{step: time.Nanosecond}, now.Add(-time.Hour), now)
-	if got.IsZero() {
-		t.Fatal("got zero, expected last set during iteration")
+	if got.IsZero() || now.Sub(got) > time.Millisecond {
+		t.Fatalf("got %v, want the firing right before now", got)
+	}
+
+	// 108000 missed one-second firings: the result must still be the latest one.
+	lastFire := now.Add(-30 * time.Hour)
+	got = findMostRecentMissed(ConstantDelay(time.Second), lastFire, now)
+	if got.IsZero() || now.Sub(got) > time.Second || !got.After(lastFire) {
+		t.Fatalf("got %v (%v before now), want within one second of now", got, now.Sub(got))
+	}
+}
+
+func TestFindMostRecentMissed_OnlyLastFireMissed(t *testing.T) {
+	now := time.Now()
+	lastFire := now.Add(-10 * time.Second)
+	got := findMostRecentMissed(ConstantDelay(time.Minute), lastFire, now)
+	if !got.Equal(lastFire) {
+		t.Fatalf("got %v, want lastFire %v", got, lastFire)
+	}
+}
+
+func TestFireKey_IndependentOfZone(t *testing.T) {
+	at := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	shanghai := time.FixedZone("CST", 8*3600)
+	if a, b := fireKey("k", at), fireKey("k", at.In(shanghai)); a != b {
+		t.Fatalf("fire keys differ by zone: %q vs %q", a, b)
 	}
 }
 
@@ -128,7 +153,9 @@ func TestFindMostRecentMissed_ZeroNextStopsLoop(t *testing.T) {
 func TestAdvancePrev_NoOpWhenEntryRemoved(t *testing.T) {
 	c := MustNew(WithLocation(time.UTC))
 	id, _ := c.AddSchedule(ConstantDelay(time.Minute), JobFunc(func(context.Context) error { return nil }))
-	c.Remove(id)
+	if err := c.Remove(id); err != nil {
+		t.Fatal(err)
+	}
 	// Should not panic and should not republish a view for a removed entry.
 	c.advancePrev(id, time.Now())
 	if _, ok := c.Entry(id); ok {
@@ -198,12 +225,12 @@ func TestCron_AddScheduleComputesNextOutsideMu(t *testing.T) {
 	}()
 	<-s.entered
 
-	removed := make(chan bool, 1)
+	removed := make(chan error, 1)
 	go func() { removed <- c.Remove(id) }()
 	select {
-	case ok := <-removed:
-		if !ok {
-			t.Fatal("Remove returned false")
+	case err := <-removed:
+		if err != nil {
+			t.Fatalf("Remove: %v", err)
 		}
 	case <-time.After(200 * time.Millisecond):
 		close(s.release)
@@ -245,13 +272,34 @@ func TestFindAllMissed(t *testing.T) {
 
 func TestFindAllMissed_CapKeepsNewest(t *testing.T) {
 	now := time.Now()
-	lastFire := now.Add(-time.Duration(missedRunAllCap+500) * time.Second)
-	got := findAllMissed(ConstantDelay(time.Second), lastFire, now)
-	if len(got) != missedRunAllCap {
-		t.Fatalf("len = %d, want cap %d", len(got), missedRunAllCap)
+	for _, backlog := range []time.Duration{time.Duration(missedRunAllCap+500) * time.Second, 30 * time.Hour} {
+		lastFire := now.Add(-backlog)
+		got := findAllMissed(ConstantDelay(time.Second), lastFire, now)
+		if len(got) != missedRunAllCap {
+			t.Fatalf("backlog %v: len = %d, want cap %d", backlog, len(got), missedRunAllCap)
+		}
+		newest := got[len(got)-1]
+		if now.Sub(newest) > time.Second {
+			t.Fatalf("backlog %v: newest kept is %v before now, want the latest firing", backlog, now.Sub(newest))
+		}
+		if oldest := got[0]; now.Sub(oldest) > time.Duration(missedRunAllCap+1)*time.Second {
+			t.Fatalf("backlog %v: oldest kept is %v before now, want about %d seconds", backlog, now.Sub(oldest), missedRunAllCap)
+		}
+		for i := 1; i < len(got); i++ {
+			if !got[i].After(got[i-1]) {
+				t.Fatalf("backlog %v: instants not increasing at %d", backlog, i)
+			}
+		}
 	}
-	if got[0].Sub(lastFire) < 400*time.Second {
-		t.Fatalf("cap should keep the newest instants, first kept = %v", got[0])
+}
+
+func TestFindAllMissed_ExactlyCapPlusLastFire(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	// lastFire plus exactly missedRunAllCap later firings: the oldest (lastFire) is dropped.
+	lastFire := now.Add(-time.Duration(missedRunAllCap) * time.Second)
+	got := findAllMissed(ConstantDelay(time.Second), lastFire, now)
+	if len(got) != missedRunAllCap || got[0].Equal(lastFire) || !got[len(got)-1].Equal(now) {
+		t.Fatalf("len=%d first=%v last=%v", len(got), got[0], got[len(got)-1])
 	}
 }
 
@@ -330,9 +378,11 @@ func TestResume_LosesRaceToConcurrentUpdate(t *testing.T) {
 	c := MustNew(WithLocation(time.UTC))
 	g := &gateSchedule{entered: make(chan struct{}), release: make(chan struct{})}
 	id, _ := c.AddSchedule(g, JobFunc(func(context.Context) error { return nil })) // Next call #1
-	c.Pause(id)
+	if err := c.Pause(id); err != nil {
+		t.Fatal(err)
+	}
 
-	resumed := make(chan bool)
+	resumed := make(chan error)
 	go func() { resumed <- c.Resume(id) }() // blocks in Next call #2
 
 	<-g.entered
@@ -341,8 +391,8 @@ func TestResume_LosesRaceToConcurrentUpdate(t *testing.T) {
 	}
 	close(g.release)
 
-	if !<-resumed {
-		t.Fatal("Resume should report true when losing the race")
+	if err := <-resumed; err != nil {
+		t.Fatalf("Resume should succeed when losing the race: %v", err)
 	}
 	e, _ := c.Entry(id)
 	if !e.Paused {
@@ -378,18 +428,20 @@ func TestResume_EntryRemovedDuringNext(t *testing.T) {
 	c := MustNew(WithLocation(time.UTC))
 	g := &gateSchedule{entered: make(chan struct{}), release: make(chan struct{})}
 	id, _ := c.AddSchedule(g, JobFunc(func(context.Context) error { return nil })) // Next call #1
-	c.Pause(id)
+	if err := c.Pause(id); err != nil {
+		t.Fatal(err)
+	}
 
-	resumed := make(chan bool)
+	resumed := make(chan error)
 	go func() { resumed <- c.Resume(id) }() // blocks in Next call #2
 
 	<-g.entered
-	if !c.Remove(id) {
-		t.Fatal("Remove failed")
+	if err := c.Remove(id); err != nil {
+		t.Fatalf("Remove: %v", err)
 	}
 	close(g.release)
 
-	if <-resumed {
-		t.Fatal("Resume should report false when the entry vanished")
+	if err := <-resumed; !errors.Is(err, ErrEntryNotFound) {
+		t.Fatalf("Resume after the entry vanished = %v, want ErrEntryNotFound", err)
 	}
 }

@@ -29,7 +29,8 @@ var ErrInvalidOption = errors.New("otelcron: invalid option")
 // Option configures Wrapper.
 type Option func(*config) error
 
-// WithTracerProvider overrides the global otel.GetTracerProvider().
+// WithTracerProvider overrides the global otel.GetTracerProvider(). A nil tp
+// is rejected.
 func WithTracerProvider(tp trace.TracerProvider) Option {
 	return func(c *config) error {
 		if nilLike(tp) {
@@ -42,7 +43,9 @@ func WithTracerProvider(tp trace.TracerProvider) Option {
 
 // Wrapper returns a cron.Wrapper that runs every invocation inside a span.
 // The span is named after the entry (via cron.EntryInfoFromContext), carries
-// cron.* attributes, and records the job's error and status.
+// cron.* attributes, and records the job's error and status; a job run
+// outside the scheduler gets a plain "cron.job" span. It returns an error
+// wrapping ErrInvalidOption for a nil or rejected option.
 func Wrapper(opts ...Option) (cron.Wrapper, error) {
 	cfg := config{tp: otel.GetTracerProvider()}
 	for i, option := range opts {

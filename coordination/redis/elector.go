@@ -55,7 +55,8 @@ type electorConfig struct {
 // ElectorOption configures an Elector.
 type ElectorOption func(*electorConfig) error
 
-// WithLeaderKey overrides DefaultLeaderKey.
+// WithLeaderKey overrides DefaultLeaderKey. The key is trimmed; an empty key
+// is rejected.
 func WithLeaderKey(key string) ElectorOption {
 	return func(config *electorConfig) error {
 		key = strings.TrimSpace(key)
@@ -67,7 +68,8 @@ func WithLeaderKey(key string) ElectorOption {
 	}
 }
 
-// WithLeaderTTL overrides DefaultLeaderTTL.
+// WithLeaderTTL overrides DefaultLeaderTTL. A ttl below one millisecond is
+// rejected.
 func WithLeaderTTL(ttl time.Duration) ElectorOption {
 	return func(config *electorConfig) error {
 		if ttl < time.Millisecond {
@@ -79,7 +81,8 @@ func WithLeaderTTL(ttl time.Duration) ElectorOption {
 }
 
 // NewElector constructs a lease-based Redis Elector with a random process
-// identity.
+// identity. It returns an error for a nil client, a nil option, an option
+// that rejects its argument, or a failure of the system random source.
 func NewElector(client redis.UniversalClient, opts ...ElectorOption) (*Elector, error) {
 	if client == nil || isNilLike(client) {
 		return nil, fmt.Errorf("rediscoord: nil client")
@@ -105,7 +108,10 @@ func NewElector(client redis.UniversalClient, opts ...ElectorOption) (*Elector, 
 	}, nil
 }
 
-// IsLeader returns false, nil while another process owns the lease.
+// IsLeader acquires the lease when it is free, renews it when this process
+// holds it, and returns false, nil while another process owns it. A nil ctx
+// is rejected; Redis failures are returned wrapped, so the scheduler skips
+// the fire with cron.SkipElectionError.
 func (e *Elector) IsLeader(ctx context.Context) (bool, error) {
 	if ctx == nil {
 		return false, fmt.Errorf("rediscoord: nil election context")
