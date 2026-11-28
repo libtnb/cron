@@ -10,8 +10,8 @@ github.com/klauspost/cpuid/v2 v2.4.0 h1:S6Hrbc7+ywsr0r+RLapfGBHfyefhCTwEh3A0tV91
 github.com/klauspost/cpuid/v2 v2.4.0/go.mod h1:19jmZ9mjzoF//ddRSUsv0zfBTJWh3QJh9FNxZTMrGxU=
 github.com/libtnb/cron v0.6.0 h1:li/YbLyfmC2S+xlVEniB9qLvURgYaLwAEEFREve6yXs=
 github.com/libtnb/cron v0.6.0/go.mod h1:hVcFjf3S5YxxeCg4M/np9Eh3p6EU4xgo2KodRd9YA5I=
-github.com/redis/go-redis/v9 v9.24.0 h1:X1AnQHWaSfMeggDQm7UFad1YwJmoZxVm5XkaP0kr6nQ=
-github.com/redis/go-redis/v9 v9.24.0/go.mod h1:ted97kpLnB4S2KJkTkw+7GzRjgkFnU909IIrksu+ut4=
+github.com/redis/go-redis/v9 v9.24.1 h1:WZ9a1QO2mkLFLYyQ1IPFvS4xBuCuZy9eXtIxppdj/Z0=
+github.com/redis/go-redis/v9 v9.24.1/go.mod h1:ted97kpLnB4S2KJkTkw+7GzRjgkFnU909IIrksu+ut4=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 github.com/yuin/gopher-lua v1.1.2 h1:yF/FjE3hD65tBbt0VXLE13HWS9h34fdzJmrWRXwobGA=

@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/alicebob/miniredis/v2 v2.41.0
 	github.com/libtnb/cron v0.6.0
-	github.com/redis/go-redis/v9 v9.24.0
+	github.com/redis/go-redis/v9 v9.24.1
 )
 
 require (
